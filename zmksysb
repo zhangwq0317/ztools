@@ -1,0 +1,279 @@
+#!/bin/ksh
+#########################################################################
+#
+# File Name        : zmksysb
+#
+# Language         : Korn Shell
+#
+# Author           : Zhang Wei Qing (zh.weiqing@gmail.com)
+#
+# Description      : Backup the AIX System and Upload the mksysb Image
+#
+# Version          : 1.6
+#
+# Revision History:
+#
+# Date        Author           Description
+# ---------------------------- -------------------------------------------
+# 2012/07/04  Zhang Wei Qing   v1.0 Initial Version
+# 2013/08/22  Zhang Wei Qing   v1.1 Optimize the EXITCHECK()
+# 2013/08/29  Zhang Wei Qing   v1.2 Add the "mount NFS" to backup
+# 2013/11/17  Zhang Wei Qing   v1.3 Revise the output for "-h"
+# 2014/07/17  Zhang Wei Qing   v1.4 Support the interrupt
+# 2014/07/24  Zhang Wei Qing   v1.5 Optimize the function ECHO
+# 2014/08/14  Zhang Wei Qing   v1.6 Display the Log Location
+#########################################################################
+
+#########Return Code List################
+#0: Normal
+#1: No Option Specified
+#2: No Parameters after "-s"/"-D"/"-m"/"-T"/"-U"/"-p"
+#3: mount NFS Failed
+#4: ping Failed
+#5: mksysb Failed
+#6: Transfer Failed
+#########################################
+
+#########Default Variables###############
+VERSION=1.6
+REMOTEUSER=`whoami`
+LOCALUSER=`whoami`
+LOCALPLATFORM=`uname -s`
+SITE=local
+CURRENTPATH=/aixfix
+FILENAME=`uname -n`.`date +%Y%m%d%H%M`.mksysb
+LOGFILE=/tmp/zmksysb.log
+CODEFILE=/tmp/zmksysb.EXITCODE
+RETURNCODE1=0
+RETURNCODE2=0
+rm -f $CODEFILE
+
+
+##########Fucntion ECHO()##################
+ECHO()
+{
+  case $LOCALPLATFORM in
+       Linux) echo -e $1 ;;
+       AIX)   echo $1    ;;
+       *)     echo $1    ;;
+  esac
+}
+
+
+##########Determine the Parameters#######
+if [ $# -eq 0 ]
+   then
+       ECHO "\nPlease Input the Correct Parameters, for example:"
+       ECHO "\nzmksysb -[hv]"
+       exit 1
+   else
+       :
+fi
+
+
+##########Get the Options################
+while getopts "D:d:F:L:m:O:p:s:T:U:hv" OPTION
+do
+    case $OPTION in
+         D) REMOTEPATH=$OPTARG  ;;
+         d) CURRENTPATH=$OPTARG ;;    ###Default Local Directory is /aixfix
+         F) FILENAME=$OPTARG    ;;    ###Default is `uname -n`.`date +%Y%m%d%H%M`.mksysb
+         L) LOGFILE=$OPTARG     ;;    ###Default is /tmp/mksysb.log
+         m) METHOD=$OPTARG      ;;    ###METHOD=ftp or sftp or scp or nfs
+         O) PARAMETERS=$OPTARG  ;;    ###PARAMETERS is the specified parameters for mksysb
+         p) REMOTEPSWD=$OPTARG  ;;    ###REMOTEPSWD is the password of Remote Server
+         s) SITE=$OPTARG        ;;    ###SITE=local or remote
+         T) REMOTESERV=$OPTARG  ;;
+         U) REMOTEUSER=$OPTARG  ;;
+         h) ECHO "\nzmksysb -[DdFLOpsTUhv]\n"
+            ECHO "-D: Remote Directory\n-d: Local Directory\n-F: File Name\n-L: Log File Location\n-O: "mksysb parameters"\n-m: Transfer Method: ftp/sftp/scp/nfs\n-s: Store the mksysb in "local" or "remote"\n-T: Remote Server Hostname\n-U: The ID on Remote Server\n-h: Get the help for parameters\n-v: Get the version information."
+            ECHO '\nExample for Local:       zmksysb -s local  -O '-e' -d /backup'
+            ECHO 'Example for Remote FTP:  zmksysb -s remote -O '-e' -d /backup -m ftp  -T 10.0.0.1 -D /mksysb -U ssoadmin -p XXXXXXXXX'
+            ECHO 'Example for Remote SFTP: zmksysb -s remote -O '-e' -d /backup -m sftp -T 10.0.0.1 -D /mksysb -U ssoadmin'
+            ECHO 'Example for Remote SCP:  zmksysb -s remote -O '-e' -d /backup -m scp  -T 10.0.0.1 -D /mksysb -U ssoadmin'
+            ECHO 'Example for NFS:         zmksysb -s remote -O '-e' -d /backup -m nfs  -T 10.0.0.1 -D /mksysb'
+            exit 0 ;;
+         v) ECHO "$VERSION" 
+            exit 0 ;;
+         *) ECHO "Error: Please Input the Correct Parameters, you can execute "zmksysb -h" to get help." 
+            exit 6 ;;
+    esac
+done
+
+
+##########Set the Interrupt################
+trap "rm -f $FILENAME;rm -f $CODEFILE;exit 255" 1 2 3 9 15 24
+
+
+##########Function EXITCHECK()#############
+EXITCHECK()
+{
+test -e $CODEFILE && EXITCODE=`cat $CODEFILE` && test $EXITCODE != 0 && exit $EXITCODE
+rm -f $CODEFILE
+}
+
+
+##########Function SFTP()#################
+SFTP()
+{
+  NETRC="/tmp/zmksysb.netrc.config"
+  echo "-cd $3" > $NETRC
+  echo "-lcd $4" >> $NETRC 
+  echo "-put $5" >> $NETRC
+  echo "-chmod 644 $3/$5" >> $NETRC
+  echo "quit" >> $NETRC 
+  /usr/bin/sftp -b $NETRC $2@$1
+  RETURNCODE2=$?
+}
+
+
+##########Function SCP()###################
+SCP()
+{
+  scp $4/$5 $2@$1:$3/$5
+  ssh $2@$1 "chmod 644 $3/$5"
+  RETURNCODE2=$?
+}
+
+
+##########Function FTP()###################
+FTP()
+{
+  NETRC=/tmp/zmksysb.netrc.config
+  echo "open $1"     > $NETRC
+  echo "user $2 $3" >> $NETRC
+  echo "binary"     >> $NETRC 
+  echo "prompt"     >> $NETRC 
+  echo "cd $4"      >> $NETRC 
+  echo "lcd $5"     >> $NETRC 
+  echo "put $6"     >> $NETRC 
+  echo "quit"       >> $NETRC 
+  /usr/bin/ftp -in   < $NETRC
+  RETURNCODE2=$?
+}
+
+
+##########Function NFS()###################
+NFS()
+{
+  NFSNAME=$3
+  mount|awk '{if($4~/nfs/) print $0}'|grep -w $3
+  if [ $? -eq 0 ]
+      then
+          ECHO "\n`date` Information: NFS is already Existed, will not mount again!!!\n" |tee -a $LOGFILE		  
+      else
+          mount -o rw,soft $1:$2 $3  
+          if [ $? -eq 0 ]
+             then
+                 ECHO "\n`date` Information: NFS is Available!!!\n" |tee -a $LOGFILE
+             else
+                 ECHO "\n`date` Error: NFS is Not Available!!!\n" |tee -a $LOGFILE && exit 3
+          fi
+  fi
+}
+
+
+##########Select the local or remote and Check the variables######
+test $SITE || (ECHO "\n`date` Error: The Parameter for "-s" Must Be Specified!!!\n" |tee -a $LOGFILE && echo 2 > $CODEFILE)
+EXITCHECK
+case $SITE in 
+     local)  test ! -d $CURRENTPATH && ECHO "\n`date` Error: The Local Directory is Not Existed!!!\n" |tee -a $LOGFILE && exit 2
+             RETURNCODE2=0
+             PINGFLAG=1
+             ;;
+     remote) test $REMOTESERV || (ECHO "\n`date` Error: The Hostname of Remote Server is Not Specified!!!\n" |tee -a $LOGFILE && echo 2 > $CODEFILE)
+             EXITCHECK
+             test $REMOTEUSER || (ECHO "\n`date` Error: The ID of Remote Server is Not Specified!!!\n"       |tee -a $LOGFILE && echo 2 > $CODEFILE)
+             EXITCHECK
+             test $REMOTEPATH || (ECHO "\n`date` Error: The Directory of Remote Server is Not Specified!!!\n"|tee -a $LOGFILE && echo 2 > $CODEFILE)
+             EXITCHECK
+             PINGFLAG=0
+             ;;
+esac
+
+
+##########Select the transfer METHOD##############################
+case $METHOD in 
+     ftp)  test $REMOTEPSWD || (ECHO "\n`date` Error: The Password of Remote Server ID is Not Specified!!! \n" |tee -a $LOGFILE && echo 2 > $CODEFILE)
+           EXITCHECK
+           TRANCMD="FTP  $REMOTESERV $REMOTEUSER $REMOTEPSWD $REMOTEPATH $CURRENTPATH $FILENAME"
+           NFSMODE=NO
+           ;;
+     sftp) TRANCMD="SFTP $REMOTESERV $REMOTEUSER $REMOTEPATH $CURRENTPATH $FILENAME"
+           NFSMODE=NO
+           ;;
+     scp)  TRANCMD="SCP  $REMOTESERV $REMOTEUSER $REMOTEPATH $CURRENTPATH $FILENAME"
+           NFSMODE=NO
+           ;;
+     nfs)  NFS $REMOTESERV $REMOTEPATH $CURRENTPATH 
+           NFSMODE=YES
+           TRANCMD=""
+           ;;
+     *)    TRANCMD="" ;;
+esac
+
+
+##########Check the Capacity for the Local Filesystem#############
+CAPACITY=`df -g $CURRENTPATH|tail -1|awk '{print $3}'`
+if [ $CAPACITY -lt 5 ]
+   then
+       ECHO "#########################################\n`date` Warning: The directory $CURRENTPATH is smaller than 5GB" |tee -a $LOGFILE
+   else
+       ECHO "#########################################\n`date` Information: The directory $CURRENTPATH is bigger than 5GB"|tee -a $LOGFILE
+fi
+
+
+##########Test the Connection between Client and Server###########
+PING()
+{
+if [ $PINGFLAG -eq 0 ]
+    then
+        ping -c 3 $REMOTESERV; RETURNCODE3=$?
+        test $RETURNCODE3 || (ECHO "\n`date` Error: The Remote Server $REMOTESERV Can't Be Ping\n"|tee -a $LOGFILE && echo 4 > $CODEFILE)
+        EXITCHECK
+    else
+        :
+fi
+}
+
+
+##########Function MKSYSB#########################################
+MKSYSB()
+{
+ECHO "\n`date` Starting Backup: /usr/bin/mksysb $PARAMETERS -i $CURRENTPATH/$FILENAME" >> $LOGFILE
+/usr/bin/mksysb "$PARAMETERS" -i $CURRENTPATH/$FILENAME >> $LOGFILE 2>&1; RETURNCODE1=$?
+if [ $RETURNCODE1 -eq 0 ]
+    then
+        ECHO "\n`date` Completed Backup Successfully with Return Code $RETURNCODE1\n" >> $LOGFILE
+    else
+        ECHO "\n`date` Backup Completed Failed with Return Code $RETURNCODE1\n" >> $LOGFILE
+        ECHO "#########################################\n`date` Redo the mksysb Backup: /usr/bin/mksysb $PARAMETERS -i $CURRENTPATH/$FILENAME" >> $LOGFILE
+        /usr/bin/mksysb $PARAMETERS -i $CURRENTPATH/$FILENAME >> $LOGFILE 2>&1; RETURNCODE1=$?
+        test $RETURNCODE1 ! -eq 0 && ECHO "\n`date` Error: Backup Completed Failed Again with Return Code $RETURNCODE1\n" >> $LOGFILE && exit 5
+fi
+}
+
+
+###########Main Program############################################
+MKSYSB
+PING
+$TRANCMD >> $LOGFILE 2>&1
+case $SITE in 
+     local)  exit 0
+             ;;
+     remote) if [ $RETURNCODE2 -eq 0 ]
+                then
+                    ECHO "\n`date` Uploaded Image Successfully with Return Code $RETURNCODE2\n" >> $LOGFILE
+                    test $NFSMODE != YES && rm -f $CURRENTPATH/$FILENAME && ECHO "\n`date` Deleted the mksysb Image\n" >> $LOGFILE 2>&1
+                else
+                    ECHO "\n`date` Warning: Uploaded Image Failed with Return Code $RETURNCODE2, then Upload Again\n" >> $LOGFILE
+                    sleep 30
+                    $TRANCMD >> $LOGFILE 2>&1
+                    test $RETURNCODE2 -eq 0 && rm -f $CURRENTPATH/$FILENAME && ECHO "\n`date` Uploaded the Image Successfully with Return Code $RETURNCODE2\n" >> $LOGFILE
+                    test -e $CURRENTPATH/$FILENAME && ECHO "\n`date` Error: Uploaded Image Failed Again, Please Upload The Image By Manual!\n"|tee -a $LOGFILE && exit 6
+             fi
+             ;;
+esac
+
+rm -f $CODEFILE
+test -s $LOGFILE && ECHO "\n`date` Information: The mksysb Log Will be Generated into $LOGFILE! \n"
