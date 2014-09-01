@@ -1,0 +1,430 @@
+#!/bin/ksh
+#########################################################################
+#
+# File Name        : zckpwd
+#
+# Language         : Korn Shell
+#
+# Author           : Zhang Wei Qing (zh.weiqing@gmail.com)
+#
+# Description      : List the IDs whose password is expired or expiring
+#
+# Version          : 1.11
+#
+# Revision History:
+#
+# Date        Author           Description
+# -----------------------------------------------------------------------
+# 2013/03/20  Zhang Wei Qing   v1.0 Initial Version
+# 2014/05/29  Zhang Wei Qing   v1.1 Support to specify the parameters
+# 2014/06/10  Zhang Wei Qing   v1.2 Support to -e/-E/-a
+# 2014/06/25  Zhang Wei Qing   v1.3 Output the information of Owner and the Day of Change Password
+# 2014/06/30  Zhang Wei Qing   v1.4 Fix the output issue by the command "tee"
+# 2014/07/02  Zhang Wei Qing   v1.5 Support the Linux Platform
+# 2014/07/02  Zhang Wei Qing   v1.6 The Parameter -p must together with -u
+# 2014/07/11  Zhang Wei Qing   v1.7 Revise the output format
+# 2014/07/17  Zhang Wei Qing   v1.8 Support the interrupt
+# 2014/07/24  Zhang Wei Qing   v1.9 Optimize the function ECHO
+# 2014/08/14  Zhang Wei Qing   v1.10 Display the Log Location in Shell Output
+# 2014/08/20  Zhang Wei Qing   v1.11 Delete the zckpwd temporary files in /tmp
+#########################################################################
+
+#########Return Code List################
+#0:  Normal
+#1:  No Option Specified
+#2:  No Parameters Specified
+#########################################
+
+#########Default Variables###############
+VERSION=1.11
+LOCALUSER=`whoami`
+SHELLPATH=`pwd`
+LOCALPLATFORM=`uname -s`
+TIMESTAMPNOW=`date +%s`
+TIMENOW=`date +%Y-%m-%d`
+HOSTNAME=`uname -n`
+DAYCOUNTNOW=`echo "$TIMESTAMPNOW/86400"|bc`
+OUTPUTFILE=/tmp/zckpwd_`uname -n`_$(date +%Y%m%d%H%M).csv
+POSTPONEMODE=NO
+SHOWMODE=EXPIRING
+RUNMODE=NO
+SINGLEMODE=NO
+REMINDFACTOR=25%
+USERLIST=/tmp/zckpwd.list.$$
+CFGFILE=/usr/local/ztools/cfg/zckpwd.cfg
+CODEFILE=/tmp/zckpwd.EXITCODE.$$
+rm -f $CODEFILE
+awk -F: '{print $1}' /etc/passwd > $USERLIST
+
+
+##########Fucntion ECHO()##################
+ECHO()
+{
+  case $LOCALPLATFORM in
+       Linux) echo -e $1 ;;
+       AIX)   echo $1    ;;
+       *)     echo $1    ;;
+  esac
+}
+
+
+#########Determine the Parameters#######
+if [ $# -eq 0 ]
+   then
+       ECHO "\nPlease Input the Correct Parameters, for example:"
+       ECHO "\nzckpwd -[hv]"
+       exit 1
+   else
+       :
+fi
+
+
+##########Get the Options################
+while getopts "f:u:o:n:peEahv" OPTION
+do
+    case $OPTION in
+         f) CFGFILE=$OPTARG
+            ;;    ###Default is /usr/local/ztools/cfg/zckpwd.cfg
+         u) LOCALUSER=$OPTARG
+            SINGLEMODE=YES
+            echo $LOCALUSER > $USERLIST
+            ;;    ###Default is ALL Users
+         o) OUTPUTFILE=$OPTARG
+            ;;    ###Default is /tmp/zckpwd_`uname -n`_$(date +%Y%m%d%H%M).out
+         p) POSTPONEMODE=YES
+            ;;
+         n) REMINDFACTOR=$OPTARG
+            ;;
+         e) SHOWMODE=EXPIRING
+            ;;
+         E) SHOWMODE=EXPIRED
+            ;;
+         a) SHOWMODE=ALL
+            ;;
+         h) ECHO "\nUsage: zckpwd -[fuopneEarhv]\n"
+            ECHO "-f: Specify the Configuration List of Each User, Default is /usr/local/ztools/cfg/zckpwd.cfg"
+            ECHO "-u: Specify the User Which You Want to Check, Default is Your Current User"
+            ECHO "-o: Specify the Output File Location"
+            ECHO "-p: Enable the Postpone Mode, the Mode can Postpone Your Password Expired Day for Your Specified ID"
+            ECHO "-n: Specify the Factor of the Remind Day Before Expired, For Example, 25% means 25% of 52 Weeks is 90 Days Will Notified"
+            ECHO "-e: Only Show the Users Which Password is Expiring"
+            ECHO "-E: Only Show the Users Which Password was Expired"
+            ECHO "-a: Show All of Expiring and Expired Users"
+            ECHO "-h: Get the help for parameters"
+            ECHO "-v: Get the version information\n"
+            ECHO "Example for Use the Configuration File to Check the Password: zckpwd -n 25% -f /usr/local/ztools/cfg/zckpwd.cfg -u zhangwq -o /tmp/ztools/zckpwd.out"
+            ECHO "Example for Use the Default Policy to Check all of Passwords: zckpwd -n 25% -o /tmp/ztools/zckpwd.out"
+            ECHO "Example for Use the Default Parameters to Check and Output:   zckpwd -n 25%"
+            ECHO "Example for Only Show the Expired Users:                      zckpwd -E"
+            ECHO "Example for Postpone the Password Expired Day:                zckpwd -u zhangwq -p\n"
+            echo '##### Note 01: I Assume the maxage is 52 (364 days), if the Remind Factor is 25%, You Will be Notified in 364*0.25=91 days! #####'
+            echo '##### Note 02: If the User with maxage=0, the User Will be Bypasswd to Check! #####'
+            exit 0 ;;
+         v) ECHO "$VERSION" 
+            exit 0 ;;
+         *) ECHO "Error: Please Input the Correct Parameters, you can execute "zckpwd -h" to get help." 
+            exit 6 ;;
+    esac
+done
+
+
+##########Set the Interrupt################
+trap "rm -f $OUTPUTFILE;rm -f $USERLIST; rm -f $CODEFILE;exit 255" 1 2 3 9 15 24
+
+
+##########Function POSTPONEPWD()####################
+POSTPONEPWD()
+{
+case $LOCALPLATFORM in 
+       AIX) cat $USERLIST | while read USER
+            do
+                TIMESTAMPUSER=`lssec -f /etc/security/passwd -s $USER -a lastupdate|awk -F"=" '{print $2}'`
+                TIMESTAMPUSER=${TIMESTAMPUSER:=0}
+                MAXAGEUSER=`lsuser -a maxage $USER | awk -F"=" '{print $2}'`
+                MAXAGEUSER=`echo "$MAXAGEUSER*7"|bc`
+                if [ $TIMESTAMPUSER -eq 0 -o $MAXAGEUSER -eq 0 ]
+                   then
+                       ECHO "\n`date` Information: Bypass this, The Password of $USER is not set or non-expired setting.\n" && continue
+                   else
+                       chsec -f /etc/security/passwd -s $USER -a lastupdate=${TIMESTAMPNOW}
+                fi
+            done
+            ;;
+     Linux) cat $USERLIST | while read USER
+            do
+                TIMESTAMPUSER=`grep -w ^$USER /etc/shadow|awk -F":" '{print $3}'`
+                TIMESTAMPUSER=${TIMESTAMPUSER:=0}
+                MAXAGEUSER=`grep -w ^$USER /etc/shadow|awk -F":" '{print $5}'`
+                if [ $TIMESTAMPUSER -eq 0 -o $MAXAGEUSER -eq 99999 ]
+                   then
+                       ECHO "\n`date` Information: Bypass this, The Password of $USER is not set or non-expired setting.\n" && continue
+                   else
+                       chage -d "$TIMENOW" $USER
+                fi
+            done
+            ;;
+         *) ECHO "\n`date` Error: The Current Platform Can Not Be Supported!\n" && exit 9
+            ;;
+esac
+}
+
+##########Function CHECKEXPIRING_AIX()###############
+CHECKEXPIRING_AIX()
+{
+cat $USERLIST | while read USER
+do
+    TIMESTAMPUSER=`lssec -f /etc/security/passwd -s $USER -a lastupdate|awk -F"=" '{print $2}'`
+    TIMESTAMPUSER=${TIMESTAMPUSER:=0}
+    CHGPWDDAY=`perl -le "print scalar localtime $TIMESTAMPUSER" local time`
+    OWNER=`grep -w ^$USER /etc/passwd | awk -F: '{print $5}'`
+    OWNER=${OWNER:=NoOwner}
+    MAXAGEUSER=`lsuser -a maxage $USER | awk -F"=" '{print $2}'`
+    MAXAGEUSER=`echo "$MAXAGEUSER*7"|bc`
+    REMINDDAY=`echo "scale=2;$MAXAGEUSER*$REMINDFACTOR"|bc`
+    test -f $CFGFILE && test `grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $1}'` && REMINDDAY=`grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $2}'`
+    if [ $TIMESTAMPUSER -eq 0 -o $MAXAGEUSER -eq 0 ]
+       then
+           ECHO "\n`date` Information: Bypass this, The Password of $USER Owned by $OWNER is not Set or Non-Expired setting.\n" && continue
+       else
+           :
+    fi
+    
+    TIMESTAMPPAST=`echo "($TIMESTAMPNOW-$TIMESTAMPUSER)/86400"|bc`
+    EXPIRINGDAY=`echo "$MAXAGEUSER-($TIMESTAMPPAST)"|bc`
+    if [ $EXPIRINGDAY -le $REMINDDAY -a $EXPIRINGDAY -gt 0 ]
+       then
+           echo "$TIMENOW,$HOSTNAME,$USER,$OWNER,$CHGPWDDAY,$EXPIRINGDAY,The Password Will be Expiring." |tee -a $OUTPUTFILE
+    fi
+done
+}
+
+
+##########Function CHECKEXPIRING_Linux()###############
+CHECKEXPIRING_Linux()
+{
+cat $USERLIST | while read USER
+do
+    TIMESTAMPUSER=`grep -w ^$USER /etc/shadow|awk -F":" '{print $3}'`
+    TIMESTAMPUSER=${TIMESTAMPUSER:=0}
+    CHGPWDDAY=`chage -l $USER|grep "Last"|awk -F":" '{print $2}' | tee`
+    OWNER=`grep -w ^$USER /etc/passwd | awk -F: '{print $5}'`
+    OWNER=${OWNER:=NoOwner}
+    MAXAGEUSER=`grep -w ^$USER /etc/shadow|awk -F":" '{print $5}'`
+    MAXAGEUSER=${MAXAGEUSER:=99999}
+    REMINDDAY=`echo "scale=2;$MAXAGEUSER*$REMINDFACTOR"|bc`
+    test -f $CFGFILE && test `grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $1}'` && REMINDDAY=`grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $2}'`
+    if [ $TIMESTAMPUSER -eq 0 -o $MAXAGEUSER -eq 99999 ]
+       then
+           ECHO "\n`date` Information: Bypass this, The Password of $USER Owned by $OWNER is not Set or Non-Expired setting.\n" && continue
+       else
+           :
+    fi
+    
+    TIMESTAMPPAST=`echo "$DAYCOUNTNOW-$TIMESTAMPUSER"|bc`
+    EXPIRINGDAY=`echo "$MAXAGEUSER-$TIMESTAMPPAST"|bc`
+    if [ $EXPIRINGDAY -le $REMINDDAY -a $EXPIRINGDAY -gt 0 ]
+       then
+           echo "$TIMENOW,$HOSTNAME,$USER,$OWNER,$CHGPWDDAY,$EXPIRINGDAY,The Password Will be Expiring." |tee -a $OUTPUTFILE
+    fi
+done
+}
+
+
+##########Function CHECKEXPIRED_AIX()##############
+CHECKEXPIRED_AIX()
+{
+cat $USERLIST | while read USER
+do
+    TIMESTAMPUSER=`lssec -f /etc/security/passwd -s $USER -a lastupdate|awk -F"=" '{print $2}'`
+    TIMESTAMPUSER=${TIMESTAMPUSER:=0}
+    CHGPWDDAY=`perl -le "print scalar localtime $TIMESTAMPUSER" local time`
+    OWNER=`grep -w ^$USER /etc/passwd | awk -F: '{print $5}'`
+    OWNER=${OWNER:=NoOwner}
+    MAXAGEUSER=`lsuser -a maxage $USER | awk -F"=" '{print $2}'`
+    MAXAGEUSER=`echo "$MAXAGEUSER*7"|bc`
+    REMINDDAY=`echo "scale=2;$MAXAGEUSER*$REMINDFACTOR"|bc`
+    test -f $CFGFILE && test `grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $1}'` && REMINDDAY=`grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $2}'`
+    if [ $TIMESTAMPUSER -eq 0 -o $MAXAGEUSER -eq 0 ]
+       then
+           ECHO "\n`date` Information: Bypass this, The Password of $USER Owned by $OWNER is not Set or Non-Expired setting.\n" && continue
+       else
+           :
+    fi
+    
+    TIMESTAMPPAST=`echo "($TIMESTAMPNOW-$TIMESTAMPUSER)/86400"|bc`
+    EXPIRINGDAY=`echo "$MAXAGEUSER-($TIMESTAMPPAST)"|bc`
+    if [ $EXPIRINGDAY -le 0 ]
+       then
+           echo "$TIMENOW,$HOSTNAME,$USER,$OWNER,$CHGPWDDAY,$EXPIRINGDAY,The Password has Expired." |tee -a $OUTPUTFILE
+    fi
+done
+}
+
+
+##########Function CHECKEXPIRED_Linux()##############
+CHECKEXPIRED_Linux()
+{
+cat $USERLIST | while read USER
+do
+    TIMESTAMPUSER=`grep -w ^$USER /etc/shadow|awk -F":" '{print $3}'`
+    TIMESTAMPUSER=${TIMESTAMPUSER:=0}
+    CHGPWDDAY=`chage -l $USER|grep "Last"|awk -F":" '{print $2}' | tee`
+    OWNER=`grep -w ^$USER /etc/passwd | awk -F: '{print $5}'`
+    OWNER=${OWNER:=NoOwner}
+    MAXAGEUSER=`grep -w ^$USER /etc/shadow|awk -F":" '{print $5}'`
+    MAXAGEUSER=${MAXAGEUSER:=99999}
+    REMINDDAY=`echo "scale=2;$MAXAGEUSER*$REMINDFACTOR"|bc`
+    test -f $CFGFILE && test `grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $1}'` && REMINDDAY=`grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $2}'`
+    if [ $TIMESTAMPUSER -eq 0 -o $MAXAGEUSER -eq 99999 ]
+       then
+           ECHO "\n`date` Information: Bypass this, The Password of $USER Owned by $OWNER is not Set or Non-Expired setting.\n" && continue
+       else
+           :
+    fi
+    
+    TIMESTAMPPAST=`echo "$DAYCOUNTNOW-$TIMESTAMPUSER"|bc`
+    EXPIRINGDAY=`echo "$MAXAGEUSER-$TIMESTAMPPAST"|bc`
+    if [ $EXPIRINGDAY -le 0 ]
+       then
+           echo "$TIMENOW,$HOSTNAME,$USER,$OWNER,$CHGPWDDAY,$EXPIRINGDAY,The Password has Expired." |tee -a $OUTPUTFILE
+    fi
+done
+}
+
+
+
+##########Function CHECKALL_AIX()###############
+CHECKALL_AIX()
+{
+cat $USERLIST | while read USER
+do
+    TIMESTAMPUSER=`lssec -f /etc/security/passwd -s $USER -a lastupdate|awk -F"=" '{print $2}'`
+    TIMESTAMPUSER=${TIMESTAMPUSER:=0}
+    CHGPWDDAY=`perl -le "print scalar localtime $TIMESTAMPUSER" local time`
+    OWNER=`grep -w ^$USER /etc/passwd | awk -F: '{print $5}'`
+    OWNER=${OWNER:=NoOwner}
+    MAXAGEUSER=`lsuser -a maxage $USER | awk -F"=" '{print $2}'`
+    MAXAGEUSER=`echo "$MAXAGEUSER*7"|bc`
+    REMINDDAY=`echo "scale=2;$MAXAGEUSER*$REMINDFACTOR"|bc`
+    test -f $CFGFILE && test `grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $1}'` && REMINDDAY=`grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $2}'`
+    if [ $TIMESTAMPUSER -eq 0 -o $MAXAGEUSER -eq 0 ]
+       then
+           ECHO "\n`date` Information: Bypass this, The Password of $USER Owned by $OWNER is not Set or Non-Expired setting.\n" && continue
+       else
+           :
+    fi
+    
+    TIMESTAMPPAST=`echo "($TIMESTAMPNOW-$TIMESTAMPUSER)/86400"|bc`
+    EXPIRINGDAY=`echo "$MAXAGEUSER-($TIMESTAMPPAST)"|bc`
+    if [ $EXPIRINGDAY -le $REMINDDAY -a $EXPIRINGDAY -gt 0 ]
+       then
+           echo "$TIMENOW,$HOSTNAME,$USER,$OWNER,$CHGPWDDAY,$EXPIRINGDAY,The Password Will be Expiring." |tee -a $OUTPUTFILE
+    fi
+    if [ $EXPIRINGDAY -le 0 ]
+       then
+           echo "$TIMENOW,$HOSTNAME,$USER,$OWNER,$CHGPWDDAY,$EXPIRINGDAY,The Password has Expired." |tee -a $OUTPUTFILE
+    fi
+done
+}
+
+
+##########Function CHECKALL_Linux()###############
+CHECKALL_Linux()
+{
+cat $USERLIST | while read USER
+do
+    TIMESTAMPUSER=`grep -w ^$USER /etc/shadow|awk -F":" '{print $3}'`
+    TIMESTAMPUSER=${TIMESTAMPUSER:=0}
+    CHGPWDDAY=`chage -l $USER|grep "Last"|awk -F":" '{print $2}' | tee`
+    OWNER=`grep -w ^$USER /etc/passwd | awk -F: '{print $5}'`
+    OWNER=${OWNER:=NoOwner}
+    MAXAGEUSER=`grep -w ^$USER /etc/shadow|awk -F":" '{print $5}'`
+    MAXAGEUSER=${MAXAGEUSER:=99999}
+    REMINDDAY=`echo "scale=2;$MAXAGEUSER*$REMINDFACTOR"|bc`
+    test -f $CFGFILE && test `grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $1}'` && REMINDDAY=`grep -v ^# $CFGFILE|grep -w $USER $CFGFILE|awk '{print $2}'`
+    if [ $TIMESTAMPUSER -eq 0 -o $MAXAGEUSER -eq 99999 ]
+       then
+           ECHO "\n`date` Information: Bypass this, The Password of $USER Owned by $OWNER is not Set or Non-Expired setting.\n" && continue
+       else
+           :
+    fi
+    
+    TIMESTAMPPAST=`echo "$DAYCOUNTNOW-$TIMESTAMPUSER"|bc`
+    EXPIRINGDAY=`echo "$MAXAGEUSER-$TIMESTAMPPAST"|bc`
+    if [ $EXPIRINGDAY -le $REMINDDAY -a $EXPIRINGDAY -gt 0 ]
+       then
+           echo "$TIMENOW,$HOSTNAME,$USER,$OWNER,$CHGPWDDAY,$EXPIRINGDAY,The Password Will be Expiring." |tee -a $OUTPUTFILE
+    fi
+    if [ $EXPIRINGDAY -le 0 ]
+       then
+           echo "$TIMENOW,$HOSTNAME,$USER,$OWNER,$CHGPWDDAY,$EXPIRINGDAY,The Password has Expired." |tee -a $OUTPUTFILE
+    fi
+done
+}
+
+
+##########Check the Variables###############
+test $POSTPONEMODE = YES && test $SINGLEMODE = NO && ECHO "\n`date` Error: The Parameter -p must be together with -u !!!\n" && exit 6
+
+
+
+##########Determine the Working ID#######
+if [ `whoami` = root ]
+   then
+       :
+   else
+       ECHO "\n`date` Error: Current ID is Not root, Not Enough Permission for The Script !\n"
+       exit 255
+fi
+
+
+##########Main Program###################
+REMINDFACTOR=`echo $REMINDFACTOR|sed s/%//g`
+REMINDFACTOR=`echo "scale=2;$REMINDFACTOR/100"|bc`
+
+case $LOCALPLATFORM in
+     AIX)   if [ $POSTPONEMODE = YES ]
+               then     
+                   POSTPONEPWD
+                   rm -f $CODEFILE
+                   rm -f $USERLIST
+               else
+                   case $SHOWMODE in
+                        EXPIRING) CHECKEXPIRING_AIX
+                                  ;;
+                        EXPIRED)  CHECKEXPIRED_AIX
+                                  ;;
+                        ALL)      CHECKALL_AIX
+                                  ;;
+                   esac
+                   rm -f $CODEFILE
+                   rm -f $USERLIST
+            fi
+            ;;
+     Linux) if [ $POSTPONEMODE = YES ]
+               then     
+                   POSTPONEPWD
+                   rm -f $CODEFILE
+                   rm -f $USERLIST
+               else
+                   case $SHOWMODE in
+                        EXPIRING) CHECKEXPIRING_Linux
+                                  ;;
+                        EXPIRED)  CHECKEXPIRED_Linux
+                                  ;;
+                        ALL)      CHECKALL_Linux
+                                  ;;
+                   esac
+                   rm -f $CODEFILE
+                   rm -f $USERLIST
+            fi
+            ;;
+         *)     ECHO "\n`date` Error: I Still Can't Support Your OS platform !\n" && exit 3
+            ;;
+esac
+
+test -s $OUTPUTFILE && cp -p $OUTPUTFILE $OUTPUTFILE.$$
+test -s $OUTPUTFILE.$$ && echo "Date,Server Name,User ID,ID Owner,Late Password Update,Expiring or Expired Days,Description" > $OUTPUTFILE
+test -s $OUTPUTFILE.$$ && cat $OUTPUTFILE.$$ >> $OUTPUTFILE && rm -f $OUTPUTFILE.$$ > /dev/null 2>&1
+test -s $OUTPUTFILE && ECHO "\n`date` Information: The Output was generated into $OUTPUTFILE !\n"
+rm -f $CODEFILE
