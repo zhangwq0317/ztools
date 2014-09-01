@@ -1,0 +1,256 @@
+#!/bin/ksh
+#########################################################################
+#
+# File Name        : zsysinfo
+#
+# Language         : Korn Shell
+#
+# Author           : Zhang Wei Qing (zh.weiqing@gmail.com)
+#
+# Description      : Backup the System Information Before Rebooting for AIX and Linux
+#
+# Version          : 1.6
+#
+# Revision History:
+#
+# Date        Author           Description
+# ---------------------------- -------------------------------------------
+# 2013/12/13  Zhang Wei Qing   v1.0 Initial Version
+# 2014/03/12  Zhang Wei Qing   v1.1 Add the hardware information
+# 2014/05/09  Zhang Wei Qing   v1.2 Add the output of dmidecode
+# 2014/06/30  Zhang Wei Qing   v1.3 Backup the User ID password and UID/GID
+# 2014/07/17  Zhang Wei Qing   v1.4 Support the interrupt
+# 2014/07/24  Zhang Wei Qing   v1.5 Optimize the function ECHO
+# 2014/08/14  Zhang Wei Qing   v1.6 Display the Output Location
+#########################################################################
+
+#########Default Variables###############
+VERSION=1.6
+LOCALPLATFORM=`uname -s`
+HOSTNAME=$(uname -n)
+TIMESTAMP=$(date +%Y%m%d%H%M%S)
+DATAPATH=$PWD
+FILENAME=${DATAPATH}/zsysinfo_${HOSTNAME}_${TIMESTAMP}.out
+WORKID=$(whoami)
+
+
+##########Fucntion ECHO()##################
+ECHO()
+{
+  case $LOCALPLATFORM in
+       Linux) echo -e $1 ;;
+       AIX)   echo $1    ;;
+       *)     echo $1    ;;
+  esac
+}
+
+
+##########Determine the Parameters#######
+if [ $# -eq 0 ]
+   then
+       DATAPATH=$PWD
+       FILENAME=${DATAPATH}/zsysinfo_${HOSTNAME}_${TIMESTAMP}.out
+   else
+       :
+fi
+
+
+##########Get the Options################
+while getopts "d:hv" OPTION
+do
+    case $OPTION in
+         d) DATAPATH=$OPTARG
+            FILENAME=${DATAPATH}/zsysinfo_${HOSTNAME}_${TIMESTAMP}.out
+            ;;    ###Default is Your Working Directory
+         h) ECHO "\nUsage: zsysinfo -[dhv]\n"
+            ECHO "-d: the Data Directory"
+            ECHO "-h: Get the help for parameters"
+            ECHO "-v: Get the version information\n"
+            ECHO "Example for No Parameters:  zsysinfo #Output and Mount Scripts Will Be Located in Your Current Directory"
+            ECHO "Example for Specifying the Directory :  zsysinfo -d /tmp/ztools/zsysinfo"
+            exit 0 ;;
+         v) ECHO "$VERSION" 
+            exit 0 ;;
+         *) ECHO "Error: Please Input the Correct Parameters, you can execute "zcmd -h" to get help." 
+            exit 6 ;;
+    esac
+done
+
+
+##########Set the Interrupt################
+trap "rm -f $FILENAME;rm -f ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.tmp ${DATAPATH}/zsysinfo_nfs_automount_${HOSTNAME}_${TIMESTAMP}.sh ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh;exit 255" 1 2 3 9 15 24
+
+
+##########Determine the Working ID#######
+if [ ${WORKID} = root ]
+   then
+       :
+   else
+       ECHO "\n`date` Warning: Current ID is Not root, The Script Can Not Collect All Information!\n"
+fi
+
+
+##########Main Program######################
+ECHO "\n\n########## Hardware Summary ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && prtconf >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && ( cat /proc/cpuinfo;cat /proc/meminfo;lspci ) >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && ( test -e /usr/sbin/dmidecode && /usr/sbin/dmidecode ) >> ${FILENAME} 2>&1
+##########LPAR Information######################
+ECHO "\n\n########## LPAR Summary ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && lparstat -i >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && ( uname -a ) >> ${FILENAME} 2>&1
+##########Adapter Information######################
+ECHO "\n\n########## Adapter Information ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && lscfg -vps >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && ( ifconfig|grep HWaddr; ) >> ${FILENAME} 2>&1
+ECHO "\n\n########## ifconfig -a ##########\n\n" >> ${FILENAME}
+ifconfig -a >> ${FILENAME} 2>&1
+ECHO "\n\n########## netstat -in ##########\n\n" >> ${FILENAME}
+netstat -in >> ${FILENAME} 2>&1
+ECHO "\n\n########## netstat -rn ##########\n\n" >> ${FILENAME}
+netstat -rn >> ${FILENAME} 2>&1
+ECHO "\n\n########## showmount -e ##########\n\n" >> ${FILENAME}
+showmount -e >> ${FILENAME} 2>&1
+ECHO "\n\n########## Active VG ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && lsvg `lsvg -o` >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && vgs >> ${FILENAME} 2>&1
+ECHO "\n\n########## VG Detail Information ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && lsvg -l `lsvg -o` >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && vgdisplay >> ${FILENAME} 2>&1
+ECHO "\n\n########## PV Information ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && lsvg -p `lsvg -o` >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && pvs >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show the Devices in /dev ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && ls -l /dev >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && find /dev -ls >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show the PVs ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && lspv >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && pvdisplay >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = AIX && ECHO "\n\n########## Show SDD PATH ##########\n\n" >> ${FILENAME}
+test -f /usr/sbin/lsvpcfg && /usr/sbin/lsvpcfg >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = AIX && ECHO "\n\n########## Show SDDPCM PATH ##########\n\n" >> ${FILENAME}
+test -f /usr/sbin/lspcmcfg && /usr/sbin/lspcmcfg >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = AIX ECHO "\n\n########## Show Power PATH ##########\n\n" >> ${FILENAME}
+test -f /usr/sbin/powermt && /usr/sbin/powermt display dev=all >> ${FILENAME} 2>&1
+ECHO "\n\n########## All File Systems ##########\n\n" >> ${FILENAME}
+mount >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/hosts ##########\n\n" >> ${FILENAME}
+cat /etc/hosts >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/services ##########\n\n" >> ${FILENAME}
+cat /etc/services >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/ftpusers ##########\n\n" >> ${FILENAME}
+cat /etc/ftpusers >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/netsvc.conf ##########\n\n" >> ${FILENAME}
+cat /etc/netsvc.conf >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/resolv.conf ##########\n\n" >> ${FILENAME}
+cat /etc/resolv.conf >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/filesystems ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && cat /etc/filesystems >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && cat /etc/fstab >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/sudoers ##########\n\n" >> ${FILENAME}
+cat /etc/sudoers >> ${FILENAME} 2>&1
+ECHO "\n\n########## User ID and Password Information ##########\n\n" >> ${FILENAME}
+cat /etc/passwd >> ${FILENAME} 2>&1
+cat /etc/group >>  ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = AIX && cat /etc/security/passwd >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && cat /etc/shadow >> ${FILENAME} 2>&1
+ECHO "\n\n########## User Password Policy ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && cat /etc/security/user >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && cat /etc/login.defs >> ${FILENAME} 2>&1
+ECHO "\n\n########## Password Record File ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && cat /etc/security/passwd >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && cat /etc/shadow >> ${FILENAME} 2>&1
+ECHO "\n\n########## User Limitation File ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && cat /etc/security/limits >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && cat /etc/security/limits.conf >> ${FILENAME} 2>&1
+ECHO "\n\n########## User Property ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && cat /etc/passwd >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && cat /etc/pam.d/system-auth >> ${FILENAME} 2>&1
+ECHO "\n\n########## User Group ##########\n\n" >> ${FILENAME}
+cat /etc/group >> ${FILENAME} 2>&1
+ECHO "\n\n########## Schedule Tasks ##########\n\n" >> ${FILENAME}
+crontab -l >> ${FILENAME} 2>&1
+ECHO "\n\n########## Network Damon Configuration ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && cat /etc/inetd.conf >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && cat /etc/xinetd.conf >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/inittab ##########\n\n" >> ${FILENAME}
+cat /etc/inittab >> ${FILENAME} 2>&1
+ECHO "\n\n########## Show /etc/syslog.conf ##########\n\n" >> ${FILENAME}
+cat /etc/syslog.conf >> ${FILENAME} 2>&1
+ECHO "\n\n########## System Performance Parameters ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && cat /etc/tunables/nextboot >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && cat /etc/sysctl.conf >> ${FILENAME} 2>&1
+ECHO "\n\n########## sysctl For Linux ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = Linux && sysctl -a >> ${FILENAME} 2>&1
+ECHO "\n\n########## vmo For AIX ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && vmo -a >> ${FILENAME} 2>&1
+ECHO "\n\n########## ioo For AIX ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && ioo -a >> ${FILENAME} 2>&1
+ECHO "\n\n########## no For AIX ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && no -a >> ${FILENAME} 2>&1
+ECHO "\n\n########## nfso For AIX ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && nfso -a >> ${FILENAME} 2>&1
+ECHO "\n\n########## schedo For AIX ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && schedo -a >> ${FILENAME} 2>&1
+ECHO "\n\n########## Device Property ##########\n\n" >> ${FILENAME}
+test ${LOCALPLATFORM} = AIX && lscfg -vpl fcs* >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = AIX && lscfg -vpl ent* >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && lspci >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && lsusb >> ${FILENAME} 2>&1
+test ${LOCALPLATFORM} = Linux && lsmod >> ${FILENAME} 2>&1
+ECHO "\n\n########## TSM process ##########\n\n" >> ${FILENAME}
+ps -ef|grep dsmc|grep -v grep >> ${FILENAME} 2>&1
+ps -ef|grep dsmsta|grep -v grep >> ${FILENAME} 2>&1
+ECHO "\n\n########## ITM process ##########\n\n" >> ${FILENAME}
+ps -ef|grep ITM|grep -v grep >> ${FILENAME} 2>&1
+ECHO "\n\n########## TEM process ##########\n\n" >> ${FILENAME}
+ps -ef|grep BESClient|grep -v grep >> ${FILENAME} 2>&1
+ECHO "\n\n########## ALL process ##########\n\n" >> ${FILENAME}
+ps -ef >> ${FILENAME} 2>&1
+
+
+if [ $LOCALPLATFORM = AIX ]
+    then
+        mount|awk '{if($4~/nfs/) print "umount "$3}' > ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh
+        mount|awk '{if($4~/nfs/) print "mount -o rw,soft "$1":"$2" "$3}' > ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.tmp
+        cat ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.tmp | while read CONTENT
+        do
+            MOUNTPOINT=$(echo $CONTENT|awk '{print $3}')
+            grep -w $MOUNTPOINT: /etc/filesystems > /dev/null 2>&1
+            if [ $? == 0 ]
+               then
+                   echo $CONTENT >> ${DATAPATH}/zsysinfo_nfs_automount_${HOSTNAME}_${TIMESTAMP}.sh
+               else
+                   echo $CONTENT >> ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh
+            fi
+        done
+    else
+        mount|awk '{if($5=="nfs") print "umount "$3}' > ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh
+        mount|awk '{if($5=="nfs") print "mount -o rw,soft,nfsvers=3,nolock "$1" "$3}' > ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.tmp
+        cat ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.tmp | while read CONTENT
+        do
+            MOUNTPOINT=$(echo $CONTENT|awk '{print $5}')
+            grep -w $MOUNTPOINT /etc/fstab > /dev/null 2>&1
+            if [ $? == 0 ]
+               then
+                   echo $CONTENT >> ${DATAPATH}/zsysinfo_nfs_automount_${HOSTNAME}_${TIMESTAMP}.sh
+               else
+                   echo $CONTENT >> ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh
+            fi
+        done
+fi
+
+rm -f ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.tmp
+test -s ${DATAPATH}/zsysinfo_nfs_automount_${HOSTNAME}_${TIMESTAMP}.sh || rm -f ${DATAPATH}/zsysinfo_nfs_automount_${HOSTNAME}_${TIMESTAMP}.sh
+test -s ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh || rm -f ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh
+test -s ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh || rm -f ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh
+
+#####Display the Output File Location#####
+test -s ${FILENAME} && ECHO "\nNotification: System Information was Generated into ${FILENAME}\n"
+test -s ${DATAPATH}/zsysinfo_nfs_automount_${HOSTNAME}_${TIMESTAMP}.sh && ECHO "\nNotification: NFS Automation mount Script was Generated into ${FILENAME} :\n"
+test -s ${DATAPATH}/zsysinfo_nfs_automount_${HOSTNAME}_${TIMESTAMP}.sh && cat ${DATAPATH}/zsysinfo_nfs_automount_${HOSTNAME}_${TIMESTAMP}.sh
+test -s ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh && ECHO "\nNotification: NFS Manual mount Script was Generated into ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh :\n"
+test -s ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh &&  cat ${DATAPATH}/zsysinfo_nfs_mount_${HOSTNAME}_${TIMESTAMP}.sh
+test -s ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh && ECHO "\nNotification: NFS Manual umount Script was Generated into ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh :\n"
+test -s ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh && cat ${DATAPATH}/zsysinfo_nfs_umount_${HOSTNAME}_${TIMESTAMP}.sh
+ECHO "\n"
