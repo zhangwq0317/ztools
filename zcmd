@@ -1,0 +1,517 @@
+#!/bin/ksh
+#########################################################################
+#
+# File Name        : zcmd
+#
+# Language         : Korn Shell
+#
+# Author           : Zhang Wei Qing (zh.weiqing@gmail.com)
+#
+# Description      : Execute the Commands or Upload/Download files on UNIX/Linux/HMC Platform
+#
+# Version          : 1.17
+#
+# Revision History:
+#
+# Date        Author           Description
+# -----------------------------------------------------------------------
+# 2012/07/28  Zhang Wei Qing   v1.0 Initial Version
+# 2012/09/09  Zhang Wei Qing   v1.1 Support the SCP/RCP to Upload/Download a File
+# 2012/11/12  Zhang Wei Qing   v1.2 Fix some bugs when copying the server list
+# 2013/03/07  Zhang Wei Qing   v1.3 Change the exit to continue
+# 2013/08/22  Zhang Wei Qing   v1.4 Optimize the EXITCHECK()
+# 2013/10/09  Zhang Wei Qing   v1.5 Resolve the issue about "Totally Quit When Executed Failed on Remote Server"
+# 2013/11/25  Zhang Wei Qing   v1.6 Fix the output of echo on Linux
+# 2013/11/26  Zhang Wei Qing   v1.7 Filter the servers which are commented by #
+# 2013/11/29  Zhang Wei Qing   v1.8 Change the option for "-f, -d"
+# 2014/05/14  Zhang Wei Qing   v1.9 Prevent the shell break when the server can't be connected, and add the confirmation function
+# 2014/05/15  Zhang Wei Qing   v1.10 Add the "-q" to disable the prompt of confirmation
+# 2014/05/15  Zhang Wei Qing   v1.11 Fix some display errors
+# 2014/06/23  Zhang Wei Qing   v1.12 Fix the bug for $HOME in $SSHKEYDIR on VIOS
+# 2014/06/27  Zhang Wei Qing   v1.13 Revise the output of "-h"
+# 2014/07/17  Zhang Wei Qing   v1.14 Support to download the files into the directory named by server name, and support the interrupt
+# 2014/07/24  Zhang Wei Qing   v1.15 Optimize the function ECHO
+# 2014/08/14  Zhang Wei Qing   v1.16 Support the Remote Execution for Special Symbol
+# 2014/08/25  Zhang Wei Qing   v1.17 Support to put some commands into a script to execute remotely
+#########################################################################
+
+#########Return Code List################
+#0:  Normal
+#1:  No Option Specified
+#2:  No Parameters Specified
+#3:  
+#4:  
+#5:  
+#6:  SCP Failed When Transfering the Data
+#7:  RCP Failed When Transfering the Data
+#8:  Can not Create the Directory
+#9:  The Current Platform Can Not Be Recognized by "uname -s"
+#10: SCP Failed When Executing the Commands
+#11: RCP Failed When Executing the Commands
+#########################################
+
+#########Default Variables###############
+VERSION=1.17
+REMOTEUSER=`whoami`
+LOCALUSER=`whoami`
+SHELLPATH=`pwd`
+LOCALPLATFORM=`uname -s`
+TARGET="$HOME"
+SSHKEYDIR=`echo ~$LOCALUSER/.ssh`
+TMPLIST=/tmp/zcmd.list.$$
+CODEFILE=/tmp/zcmd.EXITCODE.$$
+CMDFILE=/tmp/zcmd.CMDFILE.$$
+INITNOPASSWD=NO
+INITHMC=NO
+METHOD=ssh
+QUIETMODE=YES
+SCRIPTMODE=NO
+rm -f $CODEFILE
+RETURNCODE1=0
+RETURNCODE2=0
+RETURNCODE3=0
+RETURNCODE4=0
+RETURNCODE5=0
+RETURNCODE6=0
+RETURNCODE7=0
+RETURNCODE8=0
+RETURNCODE255=0
+PERMISSION=644
+
+
+##########Fucntion ECHO()##################
+ECHO()
+{
+  case $LOCALPLATFORM in
+       Linux) echo -e $1 ;;
+       AIX)   echo $1    ;;
+       *)     echo $1    ;;
+  esac
+}
+
+
+##########Determine the Parameters#######
+if [ $# -eq 0 ]
+   then
+       ECHO "\nPlease Input the Correct Parameters, For Example:"
+       ECHO "\nzcmd -[hv]"
+       exit 1
+   else
+       :
+fi
+
+
+##########Get the Options################
+while getopts "c:C:d:f:L:Im:t:u:qhv" OPTION
+do
+    case $OPTION in
+         c) CMD=$OPTARG
+            SCRIPTMODE=NO
+            ;;
+         C) CMD=$OPTARG
+            test ! -s $OPTARG && ECHO "\n`date` Error: The Script $OPTARG is no Existed !\n" && exit 1
+            test -s $OPTARG && cp -p $OPTARG $CMDFILE
+            SCRIPTMODE=YES    
+            ;;
+         d) TARGET="$OPTARG"
+            ;;    ###Default is Current Directory
+         f) SOURCE="$OPTARG"
+            ;;
+         L) SERLIST=$OPTARG
+            LISTMODE=YES        ;;
+         I) INITNOPASSWD=YES    ;;    ###Default is NO
+         m) METHOD=$OPTARG      ;;    ###Default is ssh, rsh/hmc/scpget/scpput/rcpget/rcpput are optional
+         t) REMOTESERV=$OPTARG
+            LISTMODE=NO         ;;
+         u) REMOTEUSER=$OPTARG  ;;    ###Default is the current ID
+         q) QUIETMODE=NO  ;;    ###Default is the current ID
+         h) ECHO "\nUsage: zcmd -[cdfLImtuqhv]\n"
+            ECHO "-c: Commands on the Remote Servers"
+            ECHO "-C: A Script Name Which Store Some Commands, It Will Be Executed Remotely"
+            ECHO "-d: the Target Directory or File"
+            ECHO "-f: the Source Directory or File"
+            ECHO "-L: The File Name of Server List"
+            ECHO "-I: Initialize the Access Function without Password"
+            ECHO "-m: You can select rsh/ssh/scpget/scpput/rcpget/rcpput"
+            ECHO "-t: Target Server IP Address"
+            ECHO "-u: The ID on Remote Server"
+            ECHO "-q: Disable the Interactive Mode and Enable the Quiet Mode"
+            ECHO "-h: Get the help for parameters"
+            ECHO "-v: Get the version information\n"
+            ECHO "Example for Initiate the openSSH by No Password:           zcmd -I -m ssh -t 10.0.0.1"
+            ECHO "Example for Initiate the openSSH by No Password:           zcmd -I -m hmc -t 10.0.0.1 -u hscroot"
+            ECHO "Example for Executing the Commands with Quiet Mode by SSH: zcmd -m ssh -q -t 10.0.0.1 -u zhangwq -c \"ls -l\""
+            ECHO "Example for Executing the Commands with Quiet Mode by RSH: zcmd -m rsh -q -t 10.0.0.1 -u zhangwq -c \"ls -l\""
+            ECHO "Example for Executing the Commands in The Script by SSH:   zcmd -m ssh -q -t 10.0.0.1 -u zhangwq -C /tmp/test.sh"
+            ECHO "Example for Executing the Commands by List:                zcmd -m rsh -L ./list -u zhangwq -c \"ls -l\""
+            ECHO "Example for the Default Parameters with No Confirmation:   zcmd -t 10.0.0.1 -c \"ls -l\" -q"
+            ECHO "Example for Uploading the File by SCP:                     zcmd -m scpput -t 10.0.0.1 -u zhangwq -f /tmp/test.out -d /tmp"
+            ECHO "Example for Downloading the File by RCP:                   zcmd -m rcpget -t 10.0.0.1 -u zhangwq -f /tmp/test.out -d /tmp"
+            ECHO "Example for Downloading the File by RCP:                   zcmd -m rcpget -t 10.0.0.1 -f test.out\n"
+            echo '##### Note 01: You Must Put the Commands in the Pair of Double Quotes! #####'
+            echo '##### Note 02: If You Want to Use the * in Your Filename, You Must Input the \ Before the *, for example \* #####'
+            echo '##### Note 03: If You Want to Use the $ in Your Filename, You Must Input the \ Before the $, for example \$ #####'
+            exit 0 ;;
+         v) ECHO "$VERSION" 
+            exit 0 ;;
+         *) ECHO "Error: Please Input the Correct Parameters, you can execute "zcmd -h" to get help." 
+            exit 6 ;;
+    esac
+done
+
+
+##########Set the Interrupt################
+trap "rm -f $TMPLIST;rm -f $CODEFILE;rm -f $CMDFILE;exit 255" 1 2 3 9 15 24
+
+
+##########Function EXITCHECK()#############
+EXITCHECK()
+{
+test -e $CODEFILE && EXITCODE=`cat $CODEFILE` && test $EXITCODE != 0 && exit $EXITCODE
+rm -f $CODEFILE
+}
+
+
+##########Function CONTINUECHECK()#############
+CONTINUECHECK()
+{
+test -e $CODEFILE && EXITCODE=`cat $CODEFILE` && test $EXITCODE != 0 && ECHO "\n`date` Warning: Return Code for the action is not Zero! \n" && continue
+rm -f $CODEFILE
+}
+
+
+##########Function EXECONFIRMATION()#############
+EXECONFIRMATION()
+{
+if [ $QUIETMODE = NO ]
+   then
+       ECHO "\nYou Will Execute the Commands in Quiet Mode.\n"
+   else
+       ECHO "\nYou Will Execute the Commands on the Following Servers:\n"
+       cat $TMPLIST
+       ECHO "\n##### Your Commands: \"$CMD\" #####\n"
+       ECHO "Do You Confirm to Execute This? (Y/N):  \c"
+       read YOURANSWER
+       YOURANSWER=${YOURANSWER:?"You Input is Not Correct (Case-Insensitive), Only Y or N is Permitted!"}
+       
+       if [ $YOURANSWER = Y ]
+          then
+              :
+          else
+              ECHO "\n`date` Information: You Select to Cancel this Action!\n" && exit 0
+       fi  
+fi
+}
+
+
+##########Function TRANCONFIRMATION()#############
+TRANCONFIRMATION()
+{
+if [ $QUIETMODE = NO ]
+   then
+       ECHO "\nYou Will Transfer the Data in Quiet Mode.\n"
+   else
+       ECHO "\nYou Will Transfer the Data From or To the Following Servers:\n"
+       cat $TMPLIST
+       ECHO "\n##### Data: \"$SOURCE\" ##### \n"
+       ECHO "Do You Confirm to Transfer This? (Y/N):  \c"
+       read YOURANSWER
+       YOURANSWER=${YOURANSWER:?"You Input is Not Correct (Case-Insensitive), Only Y or N is Permitted!"}
+       
+       if [ $YOURANSWER = Y ]
+          then
+              :
+          else
+              ECHO "\n`date` Information: You Select to Cancel this Action!\n" && exit 0
+       fi
+fi
+}
+
+
+##########Function INIT()####################
+INIT()
+{
+case $LOCALPLATFORM in 
+       AIX) IPADDR1=`netstat -in|grep ^en|grep -v '#'|awk '{print $4}'|xargs|sed 's/ /,/g'`
+            IPADDR2=`netstat -in|grep ^en|grep -v '#'|awk '{print $4}'|xargs`
+            ECHO "\nYour Local IP Addresses are $IPADDR1\n"
+            ;;
+     Linux) IPADDR1=`/sbin/ifconfig|grep "inet addr"|awk '{print $2}'|awk -F: '{print $2}'|grep -v 127.0.0.1|xargs|sed 's/ /,/g'`
+            IPADDR2=`/sbin/ifconfig|grep "inet addr"|awk '{print $2}'|awk -F: '{print $2}'|grep -v 127.0.0.1|xargs`
+            ECHO "\nYour Local IP Addresses are $IPADDR1\n"
+            ;;
+         *) ECHO "\n`date` Error: The Current Platform Can Not Be Recognized!\n" && exit 9
+            ;;
+esac
+
+test -d $SSHKEYDIR || mkdir -p $SSHKEYDIR
+PUBLICKEYFILE="$SSHKEYDIR/id_rsa.pub"
+PRIVATEKEYFILE="$SSHKEYDIR/id_rsa"
+case $METHOD in 
+     ssh) ECHO "#####Collect the Public Key:######\n"
+          if [ -s $PUBLICKEYFILE ]
+             then
+                 PUBLICKEY="from=\\\"$IPADDR1\\\" `cat $PUBLICKEYFILE`"
+                 ECHO "\nYour Secure Public Key of `uname -n` is $PUBLICKEY\n"
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     ECHO "\nPlease Input the Password of the Remote User $REMOTEUSER:\n"
+                     ssh $REMOTEUSER@$REMOTESERV "test -d ~"$REMOTEUSER"/.ssh||mkdir ~"$REMOTEUSER"/.ssh;echo "$PUBLICKEY" >> ~"$REMOTEUSER"/.ssh/authorized_keys;echo "$PUBLICKEY" >> ~"$REMOTEUSER"/.ssh/authorized_keys2" ; RETURNCODE3=$?
+                     test $RETURNCODE3 -eq 0 || (ECHO "\n`date` Error: Failed to Add the Public Key into $REMOTESERV!\n" && echo 6 > $CODEFILE)
+                     CONTINUECHECK
+                 done
+             else
+                 ECHO "\n#####Generate the New Public Key:######\n"
+                 ssh-keygen -q -t rsa -N "" -f $PRIVATEKEYFILE
+                 PUBLICKEY="from=\\\"$IPADDR1\\\" `cat $PUBLICKEYFILE`"
+                 ECHO "\nYour Secure Public Key of `uname -n` is $PUBLICKEY\n"
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     ECHO "\nPlease Input the Password of the Remote User $REMOTEUSER:\n"
+                     ssh $REMOTEUSER@$REMOTESERV "test -d ~"$REMOTEUSER"/.ssh||mkdir ~"$REMOTEUSER"/.ssh;echo "$PUBLICKEY" >> ~"$REMOTEUSER"/.ssh/authorized_keys;echo "$PUBLICKEY" >> ~"$REMOTEUSER"/.ssh/authorized_keys2" ; RETURNCODE3=$?
+                     test $RETURNCODE3 -eq 0 || (ECHO "\n`date` Error: Failed to Add the Public Key into $REMOTESERV!\n" && echo 6 > $CODEFILE)
+                     CONTINUECHECK
+                 done			
+          fi
+          ;;
+     rsh) ECHO "\nPlease Assure the $IPADDR1 in the /etc/hosts on the remote server!!!\n"
+          ECHO "\nBegin to Add the $IPADDR1 into ~$REMOTEUSER/.rhosts on the Remote Server!!!\n"
+          for REMOTESERV in `cat $TMPLIST`
+          do
+              ECHO "\n############### $REMOTESERV ###############\n"
+		      for IP in $IPADDR2
+              do
+                  ECHO "\nPlease Input the Password of the Remote User $REMOTEUSER:\n"
+                  rexec $REMOTESERV "echo $IP >> ~"$REMOTEUSER"/.rhosts" ; RETURNCODE4=$?
+                  test $RETURNCODE4 -eq 0 || (ECHO "\n`date` Error: Failed to Add the $IP into $REMOTESERV!\n" && echo 7 > $CODEFILE)
+                  CONTINUECHECK
+              done
+          done	          
+          ;;
+     hmc) ECHO "#####Collect the Public Key:######\n"
+          if [ -s $PUBLICKEYFILE ]
+             then
+                 PUBLICKEY="from=\"$IPADDR1\" `cat $PUBLICKEYFILE`"
+                 ECHO "\nYour Secure Public Key of `uname -n` is $PUBLICKEY\n"
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     ECHO "\nPlease Input the Password of the Remote User $REMOTEUSER:\n"
+                     ssh $REMOTEUSER@$REMOTESERV mkauthkeys -a \'$PUBLICKEY\' ; RETURNCODE5=$?
+                     test $RETURNCODE5 -eq 0 || (ECHO "\n`date` Error: Failed to Add the Public Key into $REMOTESERV!\n" && echo 8 > $CODEFILE)
+                     CONTINUECHECK
+                 done
+             else
+                 ECHO "\n#####Generate the New Public Key:######\n"
+                 ssh-keygen -q -t rsa -N "" -f $PRIVATEKEYFILE
+                 PUBLICKEY="from=\"$IPADDR1\" `cat $PUBLICKEYFILE`"
+                 ECHO "\nYour Secure Public Key of `uname -n` is $PUBLICKEY\n"
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     ECHO "\nPlease Input the Password of the Remote User $REMOTEUSER:\n"
+                     ssh $REMOTEUSER@$REMOTESERV mkauthkeys -a \'$PUBLICKEY\' ; RETURNCODE5=$?
+                     test $RETURNCODE5 -eq 0 || (ECHO "\n`date` Error: Failed to Add the Public Key into $REMOTESERV!\n" && echo 8 > $CODEFILE)
+                     CONTINUECHECK
+                 done			
+          fi
+          ;;
+       *) ECHO "\n`date` Error: The Parameter for -m must be ssh or rsh!\n" && exit 2
+          ;;
+esac
+}
+
+
+##########Function SSH()###################
+SSH()
+{
+  SERVERNAME=`ssh $2@$1 uname -n`
+  if [ $SERVERNAME ]
+     then
+         :
+     else
+         grep -w $1 /etc/hosts > /dev/null 2>&1
+         if [ $? -eq 0 ]
+            then
+                SERVERNAME=`grep -w $1 /etc/hosts|cut -f2`
+            else
+                SERVERNAME=UNKNOWN
+         fi
+  fi
+
+  case $SCRIPTMODE in
+       YES) scp -q $CMDFILE $2@$1:$CMDFILE
+            ssh $2@$1 "chmod u+x $CMDFILE; $CMDFILE; rm -f $CMDFILE"
+            RETURNCODE1=$?
+            ;;
+       NO)  ssh $2@$1 "$3"
+            RETURNCODE1=$?
+            ;;
+  esac
+
+  test $RETURNCODE1 -eq 0 || echo 3 > $CODEFILE
+  CONTINUECHECK
+  ECHO "\n############### $1 $SERVERNAME ###############\n\n\n\n"
+}
+
+
+##########Function RSH()#####################
+RSH()
+{
+  SERVERNAME=`rsh $1 -l $2 uname -n`
+  if [ $SERVERNAME ]
+     then
+         :
+     else
+         grep -w $1 /etc/hosts > /dev/null 2>&1
+         if [ $? -eq 0 ]
+            then
+                SERVERNAME=`grep -w $1 /etc/hosts|cut -f2`
+            else
+                SERVERNAME=UNKNOWN
+         fi
+  fi
+
+  case $SCRIPTMODE in
+       YES) rcp $CMDFILE $2@$1:$CMDFILE
+            rsh $1 -l $2 "chmod u+x $CMDFILE; $CMDFILE; rm -f $CMDFILE"
+            RETURNCODE1=$?
+            ;;
+       NO)  rsh $1 -l $2 "$3"
+            RETURNCODE1=$?
+            ;;
+  esac
+  
+  RETURNCODE2=$?
+  test $RETURNCODE2 -eq 0 || echo 4 > $CODEFILE
+  CONTINUECHECK
+  ECHO "\n############### $1 $SERVERNAME ###############\n\n\n\n"
+}
+
+
+##########Function SCPPUT()##################
+SCPPUT()
+{
+  scp -r "$3" $2@$1:"$4"
+  RETURNCODE6=$?
+  test $RETURNCODE6 -eq 0 || echo 10 > $CODEFILE
+  CONTINUECHECK
+}
+
+
+##########Function SCPGET()##################
+SCPGET()
+{
+  mkdir -p $4/$1
+  RETURNCODE8=$?
+  test $RETURNCODE8 != 0 && ECHO "\n`date` Error: Can not Create the directory $4/$1 !\n" && continue
+  test $RETURNCODE8 -eq 0 && scp -r $2@$1:"$3" "$4/$1"
+  RETURNCODE6=$?
+  test $RETURNCODE6 -eq 0 || echo 10 > $CODEFILE
+  CONTINUECHECK
+}
+
+
+##########Function RCPPUT()#####################
+RCPPUT()
+{
+  rcp -r "$3" $2@$1:"$4"
+  RETURNCODE7=$?
+  test $RETURNCODE7 -eq 0 || echo 11 > $CODEFILE
+  CONTINUECHECK
+}
+
+
+##########Function RCPGET()##################
+RCPGET()
+{
+  mkdir -p $4/$1
+  RETURNCODE8=$?
+  test $RETURNCODE8 != 0 && ECHO "\n`date` Error: Can not Create the directory $4/$1 !\n" && continue
+  test $RETURNCODE8 -eq 0 && rcp -r $2@$1:"$3" "$4/$1"
+  RETURNCODE7=$?
+  test $RETURNCODE7 -eq 0 || echo 11 > $CODEFILE
+  CONTINUECHECK
+}
+
+
+##########Check the Variables###############
+test $REMOTEUSER || ECHO "\n`date` Warning: The ID of Remote Server Will Use Your Current ID!!!\n"
+test $REMOTESERV && test $SERLIST && ECHO "\n`date` Error: The -t is conflicted with -L!!!\n" && echo 2 > $CODEFILE
+test $REMOTESERV || test $SERLIST || (ECHO "\n`date` Error: The -t or -L Must Be Specified!!!\n" ; echo 2 > $CODEFILE)
+EXITCHECK
+
+if [ $LISTMODE = YES ]
+   then
+       cd $SHELLPATH
+       grep -v ^# $SERLIST > $TMPLIST
+   else
+       echo $REMOTESERV > $TMPLIST
+fi
+
+
+##########Main Program###################
+if [ $INITNOPASSWD = YES ]
+   then
+       INIT
+   else
+       case $METHOD in 
+            ssh) EXECONFIRMATION
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     SSH $REMOTESERV $REMOTEUSER "$CMD"
+                 done
+                 ;;
+            rsh) EXECONFIRMATION
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     RSH $REMOTESERV $REMOTEUSER "$CMD"
+                 done
+                 ;;
+            hmc) EXECONFIRMATION
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     SSH $REMOTESERV $REMOTEUSER "$CMD"
+                 done
+                 ;;
+            scpput) TRANCONFIRMATION
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     SCPPUT  $REMOTESERV $REMOTEUSER "$SOURCE" "$TARGET"
+                 done
+                 ;;
+            scpget) TRANCONFIRMATION
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     SCPGET  $REMOTESERV $REMOTEUSER "$SOURCE" "$TARGET"
+                 done
+                 ;;
+            rcpput) TRANCONFIRMATION
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     RCPPUT  $REMOTESERV $REMOTEUSER "$SOURCE" "$TARGET"
+                 done
+                 ;;
+            rcpget) TRANCONFIRMATION
+                 for REMOTESERV in `cat $TMPLIST`
+                 do
+                     ECHO "\n############### $REMOTESERV ###############\n"
+                     RCPGET  $REMOTESERV $REMOTEUSER "$SOURCE" "$TARGET"
+                 done
+                 ;;
+              *) ECHO "\n`date` Error: The Parameter for -m must be ssh or rsh!\n" && exit 2
+                 ;;
+       esac
+fi
+
+test -s $TMPLIST && rm -f $TMPLIST
+test -s $CODEFILE && rm -f $CODEFILE
+test -s $CMDFILE && rm -f $CMDFILE
