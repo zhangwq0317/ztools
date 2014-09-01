@@ -1,0 +1,237 @@
+#!/bin/ksh
+#########################################################################
+#
+# File Name        : zcklvcopy
+#
+# Language         : Korn Shell
+#
+# Author           : Zhang Wei Qing (zh.weiqing@gmail.com)
+#
+# Description      : Check the LV Mirror Consistency(Only Support the SDD/SDDPCM/PowerPATH/Local Disk) on AIX
+#
+# Version          : 1.6
+#
+# Revision History:
+#
+# Date        Author           Description
+# --------------------------------------------------------------------
+# 2012/07/29  Zhang Wei Qing   v1.0 Initial Version
+# 2012/08/28  Zhang Wei Qing   v1.1 Integrate the LV and VG checking
+# 2014/05/15  Zhang Wei Qing   v1.2 Support the PowerPath Driver
+# 2014/06/23  Zhang Wei Qing   v1.3 Change the temporary variable with $$
+# 2014/07/17  Zhang Wei Qing   v1.4 Support the interrupt
+# 2014/07/24  Zhang Wei Qing   v1.5 Optimize the function ECHO
+# 2014/08/14  Zhang Wei Qing   v1.6 Display the Output Location
+#########################################################################
+
+#########Return Code List################
+#0: Normal
+#1: No Option Specified
+#2: No Parameters Specified
+#3: No 2 or 3 Copies Existed
+#########################################
+
+#########Default Variables###############
+VERSION=1.6
+LOCALPLATFORM=`uname -s`
+DRIVER=sddpcm
+LOGFILE=/tmp/zcklvcopy.out
+LPLIST=/tmp/LPLIST.tmp.$$
+LVLIST=/tmp/LVLIST.tmp.$$
+RETURNCODE1=0
+CODEFILE=/tmp/zcmd.EXITCODE.$$
+
+
+##########Fucntion ECHO()##################
+ECHO()
+{
+  case $LOCALPLATFORM in
+       Linux) echo -e $1 ;;
+       AIX)   echo $1    ;;
+       *)     echo $1    ;;
+  esac
+}
+
+
+##########Determine the Parameters#######
+if [ $# -eq 0 ]
+   then
+       echo "Please Input the Correct Parameters, for example:"
+       echo "zcklvcopy -[hv]"
+       exit 1
+   else
+       :
+fi
+
+
+##########Function EXITCHECK()#############
+EXITCHECK()
+{
+test -e $CODEFILE && EXITCODE=`cat $CODEFILE` && test $EXITCODE != 0 && exit $EXITCODE
+rm -f $CODEFILE
+}
+
+
+##########Get the Options################
+while getopts "d:l:V:o:hv" OPTION
+do
+    case $OPTION in
+         d) DRIVER=$OPTARG      ;;    ###Default is sddpcm
+         l) LVNAME=$OPTARG
+            LVMODE=YES          ;;
+         V) VGNAME=$OPTARG
+            LVMODE=NO           ;;
+         o) LOGFILE=$OPTARG     ;;    ###Default is standard output
+         h) ECHO "\nzcklvcopy -[cdlVhv]\n"
+            ECHO "-d: Specify The Multipath Driver none/sdd/sddpcm/powerpath, Default is sddpcm\n-l: Specify the LV Name\n-V: Specify the VG Name\n-h: Get the help for parameters\n-v: Get the version information.\n"
+            ECHO "Example for Checking the SDD LV:         zcklvcopy -d sdd -l db2lv"
+            ECHO "Example for Checking the SDDPCM VG:      zcklvcopy -d sddpcm -V db2vg"
+            ECHO "Example for Checking the Non-Driver LV:  zcklvcopy -d none -l db2lv -o /tmp/ztools/zcklvcopy.log"
+            ECHO "Example for Checking the SDDPCM LV:      zcklvcopy -l db2lv"
+            exit 0 ;;
+         v) echo "$VERSION" 
+            exit 0 ;;
+        \*) echo "Error: Please Input the Correct Parameters, you can execute "zcklvcopy -h" to get help." 
+            exit 1 ;;
+    esac
+done
+
+
+##########Set the Interrupt################
+trap "rm -f $LPLIST $LVLIST;rm -f $CODEFILE;exit 255" 1 2 3 9 15 24
+
+
+##########Function CKLV##################
+CKLV()
+{
+COPIES=`lslv $1|grep COPIES:|awk '{print $2}'`
+test $COPIES || (ECHO "\n`date` Error: The LV $1 is not Existed on Current System!\n" && echo 3 > $CODEFILE)
+EXITCHECK
+case $COPIES in
+     2) banner $1|tee -a $LOGFILE
+        lslv -m $1 | tail -n +3 > $LPLIST   
+        ECHO "\n`date` Information: Start to Check the $1\n"|tee -a $LOGFILE
+        cat $LPLIST | while read LPMAP
+        do
+            LPNAME=`echo $LPMAP | awk '{print $1}'`
+            PV1=`echo $LPMAP | awk '{print $3}'`
+            PV2=`echo $LPMAP | awk '{print $5}'`
+            PVSN1=`grep -w $PV1 $CFGFILE | awk '{print $2}' | cut -c1-7`
+            PVSN2=`grep -w $PV2 $CFGFILE | awk '{print $2}' | cut -c1-7`
+            echo "$LPNAME   $PV1($PVSN1)   $PV2($PVSN2)   \c" >> $LOGFILE
+            if [ ${PVSN1} = ${PVSN2} ]
+               then
+                   echo "WRONG" >> $LOGFILE
+                   RETURNCODE1=1
+               else
+                   echo "CORRECT" >> $LOGFILE
+            fi
+        done
+        ;;
+     3) banner "$1"|tee -a $LOGFILE
+        lslv -m $1 | tail -n +3 > $LPLIST  
+        ECHO "\n`date` Information: Start to Check the $1\n"|tee -a $LOGFILE
+        cat $LPLIST | while read LPMAP
+        do
+            LPNAME=`echo $LPMAP | awk '{print $1}'`
+            PV1=`echo $LPMAP | awk '{print $3}'`
+            PV2=`echo $LPMAP | awk '{print $5}'`
+            PV3=`echo $LPMAP | awk '{print $7}'`
+            PVSN1=`grep -w $PV1 $CFGFILE | awk '{print $2} | cut -c1-7'`
+            PVSN2=`grep -w $PV2 $CFGFILE | awk '{print $2} | cut -c1-7'`
+            PVSN3=`grep -w $PV3 $CFGFILE | awk '{print $2} | cut -c1-7'`
+            if [ ${PVSN1} = ${PVSN2} -o ${PVSN1} = ${PVSN3} -o ${PVSN2} = ${PVSN3} ]
+               then
+                   echo "WRONG" >> $LOGFILE
+                   RETURNCODE1=1
+               else
+                   echo "CORRECT" >> $LOGFILE
+            fi
+        done 
+        ;;
+     *) banner "$1"|tee -a $LOGFILE
+        ECHO "\n`date` Information: Start to Check the $1\n"|tee -a $LOGFILE
+        ECHO "\n`date` Warning: No 2 or 3 Copies Existed On $1"|tee -a $LOGFILE
+        ;;
+esac
+ECHO "\n`date` Information: Finished to Check the $1\n" >> $LOGFILE
+rm -f $LPLIST
+}
+
+
+##########Fuction CKVG###################
+CKVG()
+{
+lsvg -l $1 | tail +3 |awk '{print $1}' >  $LVLIST
+cat $LVLIST | while read VGLVNAME
+do
+    CKLV $VGLVNAME
+done
+rm -f $LVLIST
+}
+
+
+##########Check the Variables###############
+test $LVNAME || test $VGNAME || (ECHO "\n`date` Error: You Must Specify the -l or -v\n" && exit 2)
+
+
+##########Check the ID###################
+YOURID=$(whoami)
+if [ ${YOURID} = root ]
+   then
+       ECHO "\n`date` Warning: Your current ID is root, please be careful!!!\n"
+   else
+       :
+fi
+
+
+##########Check the Driver################
+if [ $DRIVER ]
+   then
+       case $DRIVER in
+            sdd)       CFGFILE=lsvpcfg.out   ;;
+            sddpcm)    CFGFILE=lspcmcfg.out  ;;
+            powerpath) CFGFILE=powerpath.out ;;
+            none)      CFGFILE=lspv.out      ;;
+            \*)        ECHO "\n`date` Error: The -d must be sdd/sddpcm/powerpath or none\n" && exit 2 ;;
+       esac
+   else
+       test -s /usr/sbin/lspcmcfg && DRIVER=sddpcm && CFGFILE=lspcmcfg.out
+       test -s /usr/sbin/lsvpcfg  && DRIVER=sdd    && CFGFILE=lsvpcfg.out
+       test -s /usr/sbin/powermt  && DRIVER=powerpath && CFGFILE=powerpath.out
+       test ! -s /usr/sbin/lspcmcfg && test ! -s /usr/sbin/lsvpcfg && DRIVER=none && CFGFILE=lspv.out
+fi
+
+
+##########Generate the Mapping List#########
+case $DRIVER in
+     sdd)       test ! -s $CFGFILE && ECHO "\n`date` Information: Generating the lsvpcfg.out"   && /usr/sbin/lsvpcfg |awk '{print $1"	"$5}' > $CFGFILE ;;
+     sddpcm)    test ! -s $CFGFILE && ECHO "\n`date` Information: Generating the lspcmcfg.out"  && /usr/sbin/lspcmcfg|awk '{print $1"	"$5}' > $CFGFILE ;;
+     powerpath) rm -f $CFGFILE.pp1 $CFGFILE.pp2 $CFGFILE.pp3 > /dev/null 2>&1
+                test ! -s $CFGFILE && ECHO "\n`date` Information: Generating the powerpath.out" && /usr/sbin/powermt display dev=all |grep hdiskpower| awk -F"=" '{print $2}' > $CFGFILE.pp1
+                test ! -s $CFGFILE && /usr/sbin/powermt display dev=all|grep ID=|awk -F"=" '{print $2}' > $CFGFILE.pp2
+                ROWNUM=1
+                cat $CFGFILE.pp2 | while read EMCID
+                do
+                    test $((ROWNUM%2)) -eq 1 && LUNID01=$EMCID && echo "$LUNID01\c" >> $CFGFILE.pp3
+                    test $((ROWNUM%2)) -eq 0 && LUNID02=$EMCID && echo "$LUNID02"   >> $CFGFILE.pp3
+                    ROWNUM=$((ROWNUM+1))
+                done
+                paste $CFGFILE.pp1 $CFGFILE.pp3 > $CFGFILE
+                rm -f $CFGFILE.pp1 $CFGFILE.pp2 $CFGFILE.pp3
+                ;;
+     none)      test ! -s $CFGFILE && ECHO "\n`date` Information: Generating the lspv.out"      && /usr/sbin/lspv    |awk '{print $1"	"$1}' > $CFGFILE ;;
+esac
+
+
+######Main Program######################
+case $LVMODE in
+     YES) CKLV $LVNAME
+          ;;
+     NO)  CKVG $VGNAME
+          ;;
+esac
+test $RETURNCODE1 -eq 1 && ECHO "\n`date` Error: There are some non-consistent copies, Please check the output!!! \n" |tee -a $LOGFILE
+test $RETURNCODE1 -eq 0 && ECHO "\n`date` Information: All of these copies is consistent\n" |tee -a $LOGFILE
+test -s $LOGFILE && ECHO "\n`date` Information: cklvcopy Logs was Generated into $LOGFILE !\n"
+echo "###########################################################################" |tee -a $LOGFILE
