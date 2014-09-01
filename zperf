@@ -1,0 +1,762 @@
+#!/bin/ksh
+#########################################################################
+#
+# File Name        : zperf
+#
+# Language         : Korn Shell
+#
+# Author           : Zhang Wei Qing (zh.weiqing@gmail.com)
+#
+# Description      : Show the Performance by Lightly Graphic on AIX/Linux Server
+#
+# Version          : 1.10
+#
+# Revision History:
+#
+# Date        Author           Description
+# -----------------------------------------------------------------------
+# 2013/09/21  Zhang Wei Qing   v1.0 Initial Version
+# 2014/01/26  Zhang Wei Qing   v1.1 Compatible for Most of Linux Platform
+# 2014/02/21  Zhang Wei Qing   v1.2 Fix some bugs on AIX/Linux platform
+# 2014/04/02  Zhang Wei Qing   v1.3 Fix the bugs "POUND+1: 0403-009" on AIX/Linux platform
+# 2014/04/18  Zhang Wei Qing   v1.4 Fix the "No Data" of VMSTAT_Linux on Linux
+# 2014/04/30  Zhang Wei Qing   v1.5 Change the crontab interval to 5 min(iostat) and 1 min(vmstat)
+# 2014/05/09  Zhang Wei Qing   v1.6 Change the temporary file names with .$$
+# 2014/07/02  Zhang Wei Qing   v1.7 Change the default $USER to `who am i` and Add the ID determination
+# 2014/07/04  Zhang Wei Qing   v1.8 Separate the vmstat collection from iostat
+# 2014/07/17  Zhang Wei Qing   v1.9 Support the interrupt
+# 2014/07/24  Zhang Wei Qing   v1.10 Optimize the function ECHO
+#########################################################################
+
+#########Return Code List################
+#0:  Normal
+#1:  No Option Specified
+#2:  No Parameters Specified
+#3:  OS Platform is not Supported
+
+
+#########Default Variables###############
+VERSION=1.10
+LOCALPLATFORM=`uname -s`
+USER=`who am i`
+MAINPATH=/tmp/zperf/`uname -n`
+DATAPATH=$MAINPATH/daily
+CRONFILE=/tmp/crontab.$USER.old
+VMCFGFILE=/usr/local/ztools/cfg/zperf.vm.${LOCALPLATFORM}
+IOCFGFILE=/usr/local/ztools/cfg/zperf.io.${LOCALPLATFORM}
+CODEFILE=/tmp/zperf.EXITCODE.$$
+INIT=NO
+INITMODE=vmstat
+WORKMODE=show
+TYPE=vmstat
+TIMEMODE=daily
+INDEX=us
+rm -f $CODEFILE > /dev/null 2>&1
+
+
+##########Fucntion ECHO()##################
+ECHO()
+{
+  case $LOCALPLATFORM in
+       Linux) echo -e $1 ;;
+       AIX)   echo $1    ;;
+       *)     echo $1    ;;
+  esac
+}
+
+
+##########Determine the Parameters#######
+if [ $# -eq 0 ]
+   then
+       ECHO "\nPlease Input the Correct Parameters, for example:"
+       ECHO "\nzperf -[hv]"
+       exit 1
+   else
+       :
+fi
+
+
+##########Function EXITCHECK()#############
+EXITCHECK()
+{
+  test -e $CODEFILE && EXITCODE=`cat $CODEFILE` && test $EXITCODE != 0 && exit $EXITCODE
+  rm -f $CODEFILE
+}
+
+
+##########Get the Options################
+while getopts "i:d:u:m:T:t:s:e:V:hv" OPTION
+do
+    case $OPTION in
+         i) INIT=YES
+            INITMODE=$OPTARG
+            test $INITMODE || INITMODE=vmstat
+            ;;    ###Default is vmstat
+         d) MAINPATH=$OPTARG
+            DATAPATH=$MAINPATH/daily
+            VMCFGFILE=/usr/local/ztools/cfg/zperf.vm.${LOCALPLATFORM}
+            IOCFGFILE=/usr/local/ztools/cfg/zperf.io.${LOCALPLATFORM}
+            mkdir -p $MAINPATH/daily > /dev/null 2>&1
+			chmod 1777 $MAINPATH/daily > /dev/null 2>&1
+            test -d $MAINPATH || (ECHO "\n`date` Error: The Directory is not Existed!\n" ; echo 2 > $CODEFILE)
+            EXITCHECK
+            test -e $VMCFGFILE || (ECHO "\n`date` Error: The VMCFGFILE is not Existed!\n" ; echo 2 > $CODEFILE)
+            EXITCHECK
+            test -e $IOCFGFILE || (ECHO "\n`date` Error: The IOCFGFILE is not Existed!\n" ; echo 2 > $CODEFILE)
+            EXITCHECK
+            ;;    ###Default is /tmp/zperf/`uname -n`
+         u) USER=$OPTARG
+            CRONFILE=/tmp/crontab.$USER.old
+            grep -w $USER /etc/passwd || (ECHO "\n`date` Error: The User is not Existed!\n" ; echo 2 > $CODEFILE)
+            EXITCHECK
+            ;;    ###Default is ztools
+         m) WORKMODE=$OPTARG
+			;;    ###Must select the collect/show
+         T) TYPE=$OPTARG 
+			;;    ###Must Select the vmstat/iostat/lparstat
+         t) TIMEMODE=$OPTARG
+            ;;    ###Must Select the hourly or daily
+         s) STARTTIME=$OPTARG
+            ;;
+         e) ENDTIME=$OPTARG
+            ;;
+         V) INDEX=$OPTARG
+            ;;    ###INDEX is You Want to Show, For iostat data, the INDEX must be fcs#:INDEX
+         h) ECHO "\nUsage: zperf -[hv]\n"
+            ECHO "-i: Initiate the crontab to run zperf collection, default is only to collect the vmstat, you must input the vmstat or iostat"
+            ECHO "-d: Input the data directory, default is /tmp/zperf"
+            ECHO "-u: The ID will be used to generate the performance data, default is ztools"
+            ECHO "-m: Please Select collect or show"
+            ECHO "-T: Which Kind of Data You Want, Options are vmstat/iostat/lparstat, Default is vmstat"
+            ECHO "-t: Which Frequency You Want, Options are daily or hourly, Default is daily"
+            ECHO "-s: Select the Performance Chart from This Time"
+            ECHO "-e: Select the Performance Chart to This Time"
+            ECHO "-V: The Performance Index Which You Want to Show. For iostat data, the INDEX must be the format Device:INDEX, you can man iostat or man vmstat to get the INDEX"
+            ECHO "-h: Get the help for parameters"
+            ECHO "-v: Get the version information\n"
+            ECHO "\n###Note: System Call named syc in the Value List, Only this is different from the output of the command vmstat !\n"
+            ECHO "Example for Initiate the Data Collection with Default ID:              zperf -i vmstat -d /tmp/zperf"
+            ECHO "Example for Initiate the Data Collection:                              zperf -i iostat -d /tmp/zperf -u test"
+            ECHO "Example for Executing the Data Collection by Manual:                   zperf -m collect -T iostat -d /tmp/zperf"
+            ECHO "Example for Executing the Data Collection with Default Type by Manual: zperf -m collect -d /tmp/zperf"
+            ECHO "Example for Show the Daily AVG Data for CPU us:                        zperf -d /tmp/zperf -s 20140120 -e 20140129"
+            ECHO "Example for Show the Hourly AVG Data for CPU sy:                       zperf -m show -t hourly -d /tmp/zperf -s 2014012800 -e 2014012900 -V sy"
+            ECHO "Example for Show the Hourly AVG Data for IOPS tps of HBA fcs0:         zperf -m show -T iostat -t hourly -d /tmp/zperf -s 2014012800 -e 2014012900 -V fcs0:tps"
+            ECHO "Example for Show the Hourly AVG Data for IOPS tps of sda on Linux:     zperf -m show -T iostat -t hourly -d /tmp/zperf -s 2014012800 -e 2014012900 -V sda:tps"
+            exit 0 ;;
+         v) echo "$VERSION" 
+            exit 0 ;;
+         *) ECHO "Error: Please Input the Correct Parameters, you can execute "zperf -h" to get help." 
+            exit 6 ;;
+    esac
+done
+
+
+##########Set the Interrupt################
+trap "rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/TIMELIST.$$ $MAINPATH/TIMELIST.tmp.$$ $MAINPATH/HOURLIST.$$ $MAINPATH/HOURLIST.tmp.$$ $MAINPATH/DAYLIST.$$ $MAINPATH/DAYLIST.tmp.$$;rm -f $CODEFILE;exit 255" 1 2 3 9 15 24
+
+
+##########Function INIT_AIX()###################
+INIT_AIX()
+{
+  if [ `whoami` = root ]
+     then
+         :
+     else
+         ECHO "\n`date` Error: Current ID is Not root, Not Enough Permission to Execute the Initialization !\n"
+         exit 255
+  fi
+  case $INITMODE in
+       vmstat) test -e /var/spool/cron/crontabs/$USER && crontab -l $USER > $CRONFILE && chmod 644 $CRONFILE
+               test -e /var/spool/cron/crontabs/$USER || (touch /var/spool/cron/crontabs/$USER; chown root:cron /var/spool/cron/crontabs/$USER; crontab -l $USER > $CRONFILE && chmod 644 $CRONFILE)
+               echo '# Collect the lparstat data' >> ${CRONFILE}
+               echo "0 1 * * * /usr/local/ztools/bin/zperf -m collect -T lparstat -d $MAINPATH > /dev/null 2>&1" >> ${CRONFILE}
+               echo '# Collect the vmstat data' >> ${CRONFILE}
+               echo "0,5,10,15,20,25,30,35,40,45,50,55 * * * * /usr/local/ztools/bin/zperf -m collect -T vmstat -d $MAINPATH > /dev/null 2>&1" >> ${CRONFILE}
+               su - $USER -c "crontab $CRONFILE"
+               ;;
+       iostat) test -e /var/spool/cron/crontabs/$USER && crontab -l $USER > $CRONFILE && chmod 644 $CRONFILE
+               test -e /var/spool/cron/crontabs/$USER || (touch /var/spool/cron/crontabs/$USER; chown root:cron /var/spool/cron/crontabs/$USER; crontab -l $USER > $CRONFILE && chmod 644 $CRONFILE)
+               echo '# Collect the lparstat data' >> ${CRONFILE}
+               echo "0 1 * * * /usr/local/ztools/bin/zperf -m collect -T lparstat -d $MAINPATH > /dev/null 2>&1" >> ${CRONFILE}
+               echo '# Collect the iostat data' >> ${CRONFILE}
+               echo "0,10,20,30,40,50 * * * * /usr/local/ztools/bin/zperf -m collect -T iostat -d $MAINPATH > /dev/null 2>&1" >> ${CRONFILE}
+               su - $USER -c "crontab $CRONFILE"
+               ;;
+       *) ECHO "\n`date` Error: The Parameter for -i must be vmstat or iostat!\n" && exit 2
+          ;;
+  esac
+}
+
+
+##########Function INIT_Linux()###################
+INIT_Linux()
+{
+  if [ `whoami` = root ]
+     then
+         :
+     else
+         ECHO "\n`date` Error: Current ID is Not root, Not Enough Permission to Execute the Initialization !\n"
+         exit 255
+  fi
+  case $INITMODE in
+       vmstat) test -e /var/spool/cron/$USER && crontab -u $USER -l > $CRONFILE && chmod 644 $CRONFILE
+               test -e /var/spool/cron/$USER || (touch /var/spool/cron/$USER; chown root:root /var/spool/cron/$USER; crontab -u $USER -l > $CRONFILE && chmod 644 $CRONFILE)
+               echo '# Collect the vmstat data' >> ${CRONFILE}
+               echo "0,5,10,15,20,25,30,35,40,45,50,55 * * * * /usr/local/ztools/bin/zperf -m collect -T vmstat -d $MAINPATH > /dev/null 2>&1" >> ${CRONFILE}
+               su - $USER -c "crontab $CRONFILE"
+               ;;
+       iostat) test -e /var/spool/cron/$USER && crontab -u $USER -l > $CRONFILE && chmod 644 $CRONFILE
+               test -e /var/spool/cron/$USER || (touch /var/spool/cron/$USER; chown root:root /var/spool/cron/$USER; crontab -u $USER -l > $CRONFILE && chmod 644 $CRONFILE)
+               echo '# Collect the iostat data' >> ${CRONFILE}
+               echo "0,10,20,30,40,50 * * * * /usr/local/ztools/bin/zperf -m collect -T iostat -d $MAINPATH > /dev/null 2>&1" >> ${CRONFILE}
+               su - $USER -c "crontab $CRONFILE"
+               ;;
+       *) ECHO "\n`date` Error: The Parameter for -i must be vmstat or iostat!\n" && exit 2
+          ;;
+  esac
+}
+
+
+##########Function VMSTAT_AIX()###################
+VMSTAT_AIX()
+{
+  TIMESTAMP=`date +%Y%m%d%H`
+  DAY=`echo $TIMESTAMP|cut -c 1-8`
+  mkdir -p $DATAPATH/${DAY} > /dev/null 2>&1 
+  /usr/bin/vmstat -Iwt 30 10|tail -10 >> $DATAPATH/${DAY}/vmstat.detail.$TIMESTAMP  #####Collect the vmstat data
+  #####Calculate the Hourly Average Data
+  rm -f $DATAPATH/${DAY}/vmstat.hourly.$TIMESTAMP > /dev/null 2>&1
+  for COUNT in `cat $VMCFGFILE|awk '{print $2}'`
+  do
+      AVG=`awk '{SUM+=$'"$COUNT"'} END{printf "%d", SUM/NR}' $DATAPATH/${DAY}/vmstat.detail.$TIMESTAMP`
+      ECHO "$AVG\t\c" >> $DATAPATH/${DAY}/vmstat.hourly.$TIMESTAMP
+  done
+  echo "$TIMESTAMP" >> $DATAPATH/${DAY}/vmstat.hourly.$TIMESTAMP
+  #####Calculate the Daily Average Data
+  cat $DATAPATH/${DAY}/vmstat.hourly.* > $DATAPATH/${DAY}/vmstat.daily.${DAY}.tmp
+  rm -f $DATAPATH/${DAY}/vmstat.daily.${DAY} > /dev/null 2>&1
+  for COUNT in `cat $VMCFGFILE|awk '{print $2}'`
+  do
+      AVG=`awk '{SUM+=$'"$COUNT"'} END{printf "%d", SUM/NR}' $DATAPATH/${DAY}/vmstat.daily.${DAY}.tmp`
+      ECHO "$AVG\t\c" >> $DATAPATH/${DAY}/vmstat.daily.${DAY}
+  done
+  echo "${DAY}" >> $DATAPATH/${DAY}/vmstat.daily.${DAY}
+  rm -f $DATAPATH/${DAY}/vmstat.daily.${DAY}.tmp
+}
+
+
+##########Function VMSTAT_Linux()###################
+VMSTAT_Linux()
+{
+  TIMESTAMP=`date +%Y%m%d%H`
+  DAY=`echo $TIMESTAMP|cut -c 1-8`
+  mkdir -p $DATAPATH/${DAY} > /dev/null 2>&1 
+  /usr/bin/vmstat 30 10|tail -10 >> $DATAPATH/${DAY}/vmstat.detail.$TIMESTAMP  #####Collect the vmstat data
+  #####Calculate the Hourly Average Data
+  rm -f $DATAPATH/${DAY}/vmstat.hourly.$TIMESTAMP > /dev/null 2>&1
+  for COUNT in `cat $VMCFGFILE|awk '{print $2}'`
+  do
+      AVG=`awk '{SUM+=$'"$COUNT"'} END{printf "%d", SUM/NR}' $DATAPATH/${DAY}/vmstat.detail.$TIMESTAMP`
+      ECHO "$AVG\t\c" >> $DATAPATH/${DAY}/vmstat.hourly.$TIMESTAMP
+  done
+  echo "$TIMESTAMP" >> $DATAPATH/${DAY}/vmstat.hourly.$TIMESTAMP
+  #####Calculate the Daily Average Data
+  cat $DATAPATH/${DAY}/vmstat.hourly.* > $DATAPATH/${DAY}/vmstat.daily.${DAY}.tmp
+  rm -f $DATAPATH/${DAY}/vmstat.daily.${DAY} > /dev/null 2>&1
+  for COUNT in `cat $VMCFGFILE|awk '{print $2}'`
+  do
+      AVG=`awk '{SUM+=$'"$COUNT"'} END{printf "%d", SUM/NR}' $DATAPATH/${DAY}/vmstat.daily.${DAY}.tmp`
+      ECHO "$AVG\t\c" >> $DATAPATH/${DAY}/vmstat.daily.${DAY}
+  done
+  echo "${DAY}" >> $DATAPATH/${DAY}/vmstat.daily.${DAY}
+  rm -f $DATAPATH/${DAY}/vmstat.daily.${DAY}.tmp
+}
+
+
+##########Function IOSTAT_AIX()###################
+IOSTAT_AIX()
+{
+  TIMESTAMP=`date +%Y%m%d%H`
+  DAY=`echo $TIMESTAMP|cut -c 1-8`
+  mkdir -p $DATAPATH/${DAY} > /dev/null 2>&1 
+  /usr/bin/iostat -adT 300 2|grep fcs >> $DATAPATH/${DAY}/iostat.detail.$TIMESTAMP #####Collect the vmstat data
+  #/usr/bin/iostat -adT 60 5|grep -E "disk|fcs"|grep : >> $DATAPATH/${DAY}/iostat.detail.$TIMESTAMP.tmp
+  #/usr/bin/iostat -adT 60 5|grep disk|grep : >> $DATAPATH/${DAY}/iostat.detail.$TIMESTAMP.tmp	
+  #####Calculate the Hourly Average Data
+  rm -f $DATAPATH/${DAY}/iostat.hourly.$TIMESTAMP > /dev/null 2>&1
+  for HBA in `awk '{print $1}' $DATAPATH/${DAY}/iostat.detail.$TIMESTAMP|sort|uniq`
+  do
+      ECHO "$HBA\t\c" >> $DATAPATH/${DAY}/iostat.hourly.$TIMESTAMP
+      for COUNT in `cat $IOCFGFILE|awk '{print $2}'`
+      do
+         AVG=`grep -w $HBA $DATAPATH/${DAY}/iostat.detail.$TIMESTAMP|awk '{SUM+=$'"$COUNT"'} END{printf "%d", SUM/NR}'`
+         ECHO "$AVG\t\c" >> $DATAPATH/${DAY}/iostat.hourly.$TIMESTAMP
+      done
+      echo "$TIMESTAMP" >> $DATAPATH/${DAY}/iostat.hourly.$TIMESTAMP
+  done
+  #####Calculate the Daily Average Data
+  cat $DATAPATH/${DAY}/iostat.hourly.* > $DATAPATH/${DAY}/iostat.daily.${DAY}.tmp
+  rm -f $DATAPATH/${DAY}/iostat.daily.${DAY} > /dev/null 2>&1
+  for HBA in `awk '{print $1}' $DATAPATH/${DAY}/iostat.daily.${DAY}.tmp|sort|uniq`
+  do
+      ECHO "$HBA\t\c" >> $DATAPATH/${DAY}/iostat.daily.${DAY}
+      for COUNT in `cat $IOCFGFILE|awk '{print $2}'`
+      do
+         AVG=`grep -w $HBA $DATAPATH/${DAY}/iostat.daily.${DAY}.tmp|awk '{SUM+=$'"$COUNT"'} END{printf "%d", SUM/NR}'`
+         ECHO "$AVG\t\c" >> $DATAPATH/${DAY}/iostat.daily.${DAY}
+      done
+      echo "${DAY}" >> $DATAPATH/${DAY}/iostat.daily.${DAY}
+  done
+  rm -f $DATAPATH/${DAY}/iostat.daily.${DAY}.tmp
+}
+
+
+##########Function IOSTAT_Linux()###################
+IOSTAT_Linux()
+{
+  TIMESTAMP=`date +%Y%m%d%H`
+  DAY=`echo $TIMESTAMP|cut -c 1-8`
+  mkdir -p $DATAPATH/${DAY} > /dev/null 2>&1 
+  /usr/bin/iostat -dkt 300 2|grep -v Linux|grep -v :|sed /^$/d >> $DATAPATH/${DAY}/iostat.detail.$TIMESTAMP  #####Collect the vmstat data
+  #####Calculate the Hourly Average Data
+  rm -f $DATAPATH/${DAY}/iostat.hourly.$TIMESTAMP > /dev/null 2>&1
+  for DEVICE in `awk '{print $1}' $DATAPATH/${DAY}/iostat.detail.$TIMESTAMP|sort|uniq`
+  do
+      ECHO "$DEVICE\t\c" >> $DATAPATH/${DAY}/iostat.hourly.$TIMESTAMP
+      for COUNT in `cat $IOCFGFILE|awk '{print $2}'`
+      do
+         AVG=`grep -w $DEVICE $DATAPATH/${DAY}/iostat.detail.$TIMESTAMP|awk '{SUM+=$'"$COUNT"'} END{printf "%d", SUM/NR}'`
+         ECHO "$AVG\t\c" >> $DATAPATH/${DAY}/iostat.hourly.$TIMESTAMP
+      done
+      echo "$TIMESTAMP" >> $DATAPATH/${DAY}/iostat.hourly.$TIMESTAMP
+  done
+  #####Calculate the Daily Average Data
+  cat $DATAPATH/${DAY}/iostat.hourly.* > $DATAPATH/${DAY}/iostat.daily.${DAY}.tmp
+  rm -f $DATAPATH/${DAY}/iostat.daily.${DAY} > /dev/null 2>&1
+  for DEVICE in `awk '{print $1}' $DATAPATH/${DAY}/iostat.daily.${DAY}.tmp|sort|uniq`
+  do
+      ECHO "$DEVICE\t\c" >> $DATAPATH/${DAY}/iostat.daily.${DAY}
+      for COUNT in `cat $IOCFGFILE|awk '{print $2}'`
+      do
+         AVG=`grep -w $DEVICE $DATAPATH/${DAY}/iostat.daily.${DAY}.tmp|awk '{SUM+=$'"$COUNT"'} END{printf "%d", SUM/NR}'`
+         ECHO "$AVG\t\c" >> $DATAPATH/${DAY}/iostat.daily.${DAY}
+      done
+      echo "${DAY}" >> $DATAPATH/${DAY}/iostat.daily.${DAY}
+  done
+  rm -f $DATAPATH/${DAY}/iostat.daily.${DAY}.tmp
+}
+
+
+##########Function LPARSTAT()###################
+LPARSTAT_AIX()
+{
+  TIMESTAMP=`date +%Y%m%d%H`
+  DAY=`echo $TIMESTAMP|cut -c 1-8`
+  mkdir -p $DATAPATH/${DAY} > /dev/null 2>&1 
+  /usr/bin/lparstat -i > $DATAPATH/${DAY}/lparstat.${DAY}
+}
+
+
+##########Function DISPLAY_AIX()###################
+DISPLAY_AIX()
+{
+  ### $1 is date or time, $2 is MAX Value, $3 is Current Value
+  VALUE1=$1; VALUE2=$2; VALUE3=$3
+  test $VALUE1 || VALUE1=NULL
+  test $VALUE2 || VALUE2=0
+  test $VALUE3 || VALUE2=0
+  if [ $VALUE2 -eq 0 ]
+     then
+         ECHO "$VALUE1 |\c"
+         echo " $VALUE3"
+     else
+         POUND=`echo "scale=2;$VALUE3/$VALUE2*60"|bc|awk '{print int($1)}'`  #####*60 Mean the Max is 60 '#'
+         POUND=$((POUND+1))
+         ECHO "$VALUE1 |\c"
+         awk 'BEGIN{OFS="#";NF='"$POUND"';printf}'
+         echo " $VALUE3"
+  fi
+}
+
+
+##########Function DISPLAY_Linux()###################
+DISPLAY_Linux()
+{
+  ### $1 is date or time, $2 is MAX Value, $3 is Current Value
+  VALUE1=$1; VALUE2=$2; VALUE3=$3
+  test $VALUE1 || VALUE1=NULL
+  test $VALUE2 || VALUE2=0
+  test $VALUE3 || VALUE2=0
+  if [ $VALUE2 -eq 0 ]
+     then
+         ECHO "$VALUE1 |\c"
+         echo " $VALUE3"
+     else
+         POUND=`echo "scale=2;$VALUE3/$VALUE2*60"|bc|awk '{print int($1)}'`  #####*60 Mean the Max is 60 '#'
+         POUND=$((POUND+1))
+         ECHO "$VALUE1 |\c"
+         awk 'BEGIN{OFS="#";NF='"$POUND"';printf $OFS}'
+         echo " $VALUE3"
+  fi
+}
+
+
+##########Function SHOW_D_AIX()#####################
+SHOW_D_AIX()
+{
+  test $INDEX || (ECHO "\n`date` Error: The Index You Want to Show Must be Specified!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  test $STARTTIME || (ECHO "\n`date` Error: The Start Time You Want to Show Must be Specified!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  CHARCOUNT=`echo $STARTTIME|wc -m`
+  test $CHARCOUNT -eq 9 || (ECHO "\n`date` Error: The Start Time Must be YYYYMMDD!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  test $ENDTIME || (ECHO "\n`date` Error: The End Time You Want to Show Must be Specified!!!\n" && echo 2 > $CODEFILE)
+  EXITCHECK
+  CHARCOUNT=`echo $ENDTIME|wc -m`
+  test $CHARCOUNT -eq 9 || (ECHO "\n`date` Error: The End Time Must be YYYYMMDD!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  
+  ls -1 $DATAPATH|grep -w [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] > $MAINPATH/TIMELIST.tmp.$$
+  awk '{if($1>='"$STARTTIME"' && $1<='"$ENDTIME"') print $1}' $MAINPATH/TIMELIST.tmp.$$ > $MAINPATH/TIMELIST.$$
+  rm -f $MAINPATH/TIMELIST.tmp.$$
+  rm -f $MAINPATH/SHOWLIST.$$ > /dev/null 2>&1
+  case $TYPE in 
+       vmstat) COLUMN=`grep -w $INDEX $VMCFGFILE|awk '{print $2}'`
+               for TIME in `cat $MAINPATH/TIMELIST.$$`
+               do
+                   cat $DATAPATH/$TIME/vmstat.daily.$TIME|awk '{print $NF,$'"$COLUMN"'}' >> $MAINPATH/SHOWLIST.$$
+               done
+               MAX=`sort -n +1 $MAINPATH/SHOWLIST.$$|tail -1|awk '{print $2}'`
+               test $MAX || MAX=0
+               cat $MAINPATH/SHOWLIST.$$|while read SHOWDATA
+               do
+                   (test $SHOWDATA || SHOWDATA="NULL 0") 2> /dev/null
+                   TIME=`echo $SHOWDATA|awk '{print $1}'`
+                   DATA=`echo $SHOWDATA|awk '{print $2}'`
+                   DISPLAY_AIX $TIME $MAX $DATA
+               done
+               rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/TIMELIST.$$
+               ;;
+       iostat) DEVICENAME=`echo $INDEX|awk -F: '{print $1}'`
+               IOINDEX=`echo $INDEX|awk -F: '{print $2}'`
+               COLUMN=`grep -w $IOINDEX $IOCFGFILE|awk '{print $2}'`
+               for TIME in `cat $MAINPATH/TIMELIST.$$`
+               do
+                   grep -w $DEVICENAME $DATAPATH/$TIME/iostat.daily.$TIME|awk '{print $NF,$'"$COLUMN"'}' >> $MAINPATH/SHOWLIST.$$
+               done
+               MAX=`sort -n +1 $MAINPATH/SHOWLIST.$$|tail -1|awk '{print $2}'`
+               test $MAX || MAX=0
+               cat $MAINPATH/SHOWLIST.$$|while read SHOWDATA
+               do
+                   (test $SHOWDATA || SHOWDATA="NULL 0") 2> /dev/null
+                   TIME=`echo $SHOWDATA|awk '{print $1}'`
+                   DATA=`echo $SHOWDATA|awk '{print $2}'`
+                   DISPLAY_AIX $TIME $MAX $DATA
+               done
+               rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/TIMELIST.$$
+               ;;
+       lparstat)   
+                  ;;
+       *) ECHO "\n`date` Error: The Parameter for -T must be vmstat/iostat/lparstat !\n" && exit 2
+          ;;
+  esac
+  rm -f $MAINPATH/SHOWLIST.$$ > /dev/null 2>&1
+}
+
+
+##########Function SHOW_D_Linux()#####################
+SHOW_D_Linux()
+{
+  test $INDEX || (ECHO "\n`date` Error: The Index You Want to Show Must be Specified!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  test $STARTTIME || (ECHO "\n`date` Error: The Start Time You Want to Show Must be Specified!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  CHARCOUNT=`echo $STARTTIME|wc -m`
+  test $CHARCOUNT -eq 9 || (ECHO "\n`date` Error: The Start Time Must be YYYYMMDD!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  test $ENDTIME || (ECHO "\n`date` Error: The End Time You Want to Show Must be Specified!!!\n" && echo 2 > $CODEFILE)
+  EXITCHECK
+  CHARCOUNT=`echo $ENDTIME|wc -m`
+  test $CHARCOUNT -eq 9 || (ECHO "\n`date` Error: The End Time Must be YYYYMMDD!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  
+  ls -1 $DATAPATH|grep -w [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] > $MAINPATH/TIMELIST.tmp.$$
+  awk '{if($1>='"$STARTTIME"' && $1<='"$ENDTIME"') print $1}' $MAINPATH/TIMELIST.tmp.$$ > $MAINPATH/TIMELIST.$$
+  rm -f $MAINPATH/TIMELIST.tmp.$$
+  rm -f $MAINPATH/SHOWLIST.$$ > /dev/null 2>&1
+  case $TYPE in 
+       vmstat) COLUMN=`grep -w $INDEX $VMCFGFILE|awk '{print $2}'`
+               for TIME in `cat $MAINPATH/TIMELIST.$$`
+               do
+                   cat $DATAPATH/$TIME/vmstat.daily.$TIME|awk '{print $NF,$'"$COLUMN"'}' >> $MAINPATH/SHOWLIST.$$
+               done
+               MAX=`sort -n -k2 $MAINPATH/SHOWLIST.$$|tail -1|awk '{print $2}'`
+               test $MAX || MAX=0
+               cat $MAINPATH/SHOWLIST.$$|while read SHOWDATA
+               do
+                   (test $SHOWDATA || SHOWDATA="NULL 0") 2> /dev/null
+                   TIME=`echo $SHOWDATA|awk '{print $1}'`
+                   DATA=`echo $SHOWDATA|awk '{print $2}'`
+                   DISPLAY_Linux $TIME $MAX $DATA
+               done
+               rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/TIMELIST.$$
+               ;;
+       iostat) DEVICENAME=`echo $INDEX|awk -F: '{print $1}'`
+               IOINDEX=`echo $INDEX|awk -F: '{print $2}'`
+               COLUMN=`grep -w $IOINDEX $IOCFGFILE|awk '{print $2}'`
+               for TIME in `cat $MAINPATH/TIMELIST.$$`
+               do
+                   grep -w $DEVICENAME $DATAPATH/$TIME/iostat.daily.$TIME|awk '{print $NF,$'"$COLUMN"'}' >> $MAINPATH/SHOWLIST.$$
+               done
+               MAX=`sort -n -k2 $MAINPATH/SHOWLIST.$$|tail -1|awk '{print $2}'`
+               test $MAX || MAX=0
+               cat $MAINPATH/SHOWLIST.$$|while read SHOWDATA
+               do
+                   (test $SHOWDATA || SHOWDATA="NULL 0") 2> /dev/null
+                   TIME=`echo $SHOWDATA|awk '{print $1}'`
+                   DATA=`echo $SHOWDATA|awk '{print $2}'`
+                   DISPLAY_Linux $TIME $MAX $DATA
+               done
+               rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/TIMELIST.$$
+               ;;
+       lparstat)   
+                  ;;
+       *) ECHO "\n`date` Error: The Parameter for -T must be vmstat/iostat/lparstat !\n" && exit 2
+          ;;
+  esac
+  rm -f $MAINPATH/SHOWLIST.$$ > /dev/null 2>&1
+}
+
+
+##########Function SHOW_H_AIX()######################
+SHOW_H_AIX()
+{
+  test $INDEX || (ECHO "\n`date` Error: The Index You Want to Show Must be Specified!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  test $STARTTIME || (ECHO "\n`date` Error: The Start Time You Want to Show Must be Specified!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  CHARCOUNT=`echo $STARTTIME|wc -m`
+  test $CHARCOUNT -eq 11 || (ECHO "\n`date` Error: The Start Time Must be YYYYMMDDHH!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  test $ENDTIME || (ECHO "\n`date` Error: The End Time You Want to Show Must be Specified!!!\n" && echo 2 > $CODEFILE)
+  EXITCHECK
+  CHARCOUNT=`echo $ENDTIME|wc -m`
+  test $CHARCOUNT -eq 11 || (ECHO "\n`date` Error: The End Time Must be YYYYMMDDHH!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  
+  STARTDAY=`echo $STARTTIME|cut -c 1-8`
+  ENDDAY=`echo $ENDTIME|cut -c 1-8`
+  ls -1 $DATAPATH|grep -w [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] > $MAINPATH/DAYLIST.tmp.$$
+  awk '{if($1>='"$STARTDAY"' && $1<='"$ENDDAY"') print $1}' $MAINPATH/DAYLIST.tmp.$$ > $MAINPATH/DAYLIST.$$
+  rm -f $MAINPATH/DAYLIST.tmp.$$ > /dev/null 2>&1
+  rm -f $MAINPATH/SHOWLIST.$$ > /dev/null 2>&1
+  case $TYPE in 
+       vmstat) COLUMN=`grep -w $INDEX $VMCFGFILE|awk '{print $2}'`
+               for TIME in `cat $MAINPATH/DAYLIST.$$`
+               do
+                   ls -1 $DATAPATH/$TIME/vmstat.hourly.* > $MAINPATH/HOURLIST.tmp.$$ 2> /dev/null
+                   awk -F'.' '{if($NF>='"$STARTTIME"' && $NF<='"$ENDTIME"') print $0}' $MAINPATH/HOURLIST.tmp.$$ > $MAINPATH/HOURLIST.$$
+                   rm -f $MAINPATH/HOURLIST.tmp.$$ > /dev/null 2>&1
+                   for HOURFILE in `cat $MAINPATH/HOURLIST.$$`
+                   do
+                       awk '{print $NF,$'"$COLUMN"'}' $HOURFILE >> $MAINPATH/SHOWLIST.$$
+                   done
+               done
+               rm -f $MAINPATH/HOURLIST.$$ > /dev/null 2>&1
+               MAX=`sort -n +1 $MAINPATH/SHOWLIST.$$|tail -1|awk '{print $2}'`
+               test $MAX || MAX=0
+               cat $MAINPATH/SHOWLIST.$$|while read SHOWDATA
+               do
+                   (test $SHOWDATA || SHOWDATA="NULL 0") 2> /dev/null
+                   TIME=`echo $SHOWDATA|awk '{print $1}'`
+                   DATA=`echo $SHOWDATA|awk '{print $2}'`
+                   DISPLAY_AIX $TIME $MAX $DATA
+               done
+               rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/DAYLIST.$$
+               ;;
+       iostat) DEVICENAME=`echo $INDEX|awk -F: '{print $1}'`
+               IOINDEX=`echo $INDEX|awk -F: '{print $2}'`
+               COLUMN=`grep -w $IOINDEX $IOCFGFILE|awk '{print $2}'`
+               for TIME in `cat $MAINPATH/DAYLIST.$$`
+               do
+                   ls -1 $DATAPATH/$TIME/iostat.hourly.* > $MAINPATH/HOURLIST.tmp.$$ 2> /dev/null
+                   awk -F'.' '{if($NF>='"$STARTTIME"' && $NF<='"$ENDTIME"') print $0}' $MAINPATH/HOURLIST.tmp.$$ > $MAINPATH/HOURLIST.$$
+                   rm -f $MAINPATH/HOURLIST.tmp.$$ > /dev/null 2>&1
+                   for HOURFILE in `cat $MAINPATH/HOURLIST.$$`
+                   do
+                       grep -w $DEVICENAME $HOURFILE|awk '{print $NF,$'"$COLUMN"'}' >> $MAINPATH/SHOWLIST.$$
+                   done
+               done
+               rm -f $MAINPATH/HOURLIST.$$ > /dev/null 2>&1
+               MAX=`sort -n +1 $MAINPATH/SHOWLIST.$$|tail -1|awk '{print $2}'`
+               test $MAX || MAX=0
+               cat $MAINPATH/SHOWLIST.$$|while read SHOWDATA
+               do
+                   (test $SHOWDATA || SHOWDATA="NULL 0") 2> /dev/null
+                   TIME=`echo $SHOWDATA|awk '{print $1}'`
+                   DATA=`echo $SHOWDATA|awk '{print $2}'`
+                   DISPLAY_AIX $TIME $MAX $DATA
+               done
+               rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/DAYLIST.$$
+               ;;
+       lparstat)   
+                  ;;
+       *) ECHO "\n`date` Error: The Parameter for -T must be vmstat/iostat/lparstat !\n" && exit 2
+          ;;
+  esac
+  rm -f $MAINPATH/DAYLIST.$$ > /dev/null 2>&1
+  rm -f $MAINPATH/SHOWLIST.$$ > /dev/null 2>&1
+}
+
+
+##########Function SHOW_H_Linux()######################
+SHOW_H_Linux()
+{
+  test $INDEX || (ECHO "\n`date` Error: The Index You Want to Show Must be Specified!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  test $STARTTIME || (ECHO "\n`date` Error: The Start Time You Want to Show Must be Specified!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  CHARCOUNT=`echo $STARTTIME|wc -m`
+  test $CHARCOUNT -eq 11 || (ECHO "\n`date` Error: The Start Time Must be YYYYMMDDHH!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  test $ENDTIME || (ECHO "\n`date` Error: The End Time You Want to Show Must be Specified!!!\n" && echo 2 > $CODEFILE)
+  EXITCHECK
+  CHARCOUNT=`echo $ENDTIME|wc -m`
+  test $CHARCOUNT -eq 11 || (ECHO "\n`date` Error: The End Time Must be YYYYMMDDHH!!!\n"; echo 2 > $CODEFILE)
+  EXITCHECK
+  
+  STARTDAY=`echo $STARTTIME|cut -c 1-8`
+  ENDDAY=`echo $ENDTIME|cut -c 1-8`
+  ls -1 $DATAPATH|grep -w [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] > $MAINPATH/DAYLIST.tmp.$$
+  awk '{if($1>='"$STARTDAY"' && $1<='"$ENDDAY"') print $1}' $MAINPATH/DAYLIST.tmp.$$ > $MAINPATH/DAYLIST.$$
+  rm -f $MAINPATH/DAYLIST.tmp.$$ > /dev/null 2>&1
+  rm -f $MAINPATH/SHOWLIST.$$ > /dev/null 2>&1
+  case $TYPE in 
+       vmstat) COLUMN=`grep -w $INDEX $VMCFGFILE|awk '{print $2}'`
+               for TIME in `cat $MAINPATH/DAYLIST.$$`
+               do
+                   ls -1 $DATAPATH/$TIME/vmstat.hourly.* > $MAINPATH/HOURLIST.tmp.$$ 2> /dev/null
+                   awk -F'.' '{if($NF>='"$STARTTIME"' && $NF<='"$ENDTIME"') print $0}' $MAINPATH/HOURLIST.tmp.$$ > $MAINPATH/HOURLIST.$$
+                   rm -f $MAINPATH/HOURLIST.tmp.$$ > /dev/null 2>&1
+                   for HOURFILE in `cat $MAINPATH/HOURLIST.$$`
+                   do
+                       awk '{print $NF,$'"$COLUMN"'}' $HOURFILE >> $MAINPATH/SHOWLIST.$$
+                   done
+               done
+               rm -f $MAINPATH/HOURLIST.$$ > /dev/null 2>&1
+               MAX=`sort -n -k2 $MAINPATH/SHOWLIST.$$|tail -1|awk '{print $2}'`
+               test $MAX || MAX=0
+               cat $MAINPATH/SHOWLIST.$$|while read SHOWDATA
+               do
+                   (test $SHOWDATA || SHOWDATA="NULL 0") 2> /dev/null
+                   TIME=`echo $SHOWDATA|awk '{print $1}'`
+                   DATA=`echo $SHOWDATA|awk '{print $2}'`
+                   DISPLAY_Linux $TIME $MAX $DATA
+               done
+               rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/DAYLIST.$$
+               ;;
+       iostat) DEVICENAME=`echo $INDEX|awk -F: '{print $1}'`
+               IOINDEX=`echo $INDEX|awk -F: '{print $2}'`
+               COLUMN=`grep -w $IOINDEX $IOCFGFILE|awk '{print $2}'`
+               for TIME in `cat $MAINPATH/DAYLIST.$$`
+               do
+                   ls -1 $DATAPATH/$TIME/iostat.hourly.* > $MAINPATH/HOURLIST.tmp.$$ 2> /dev/null
+                   awk -F'.' '{if($NF>='"$STARTTIME"' && $NF<='"$ENDTIME"') print $0}' $MAINPATH/HOURLIST.tmp.$$ > $MAINPATH/HOURLIST.$$
+                   rm -f $MAINPATH/HOURLIST.tmp.$$ > /dev/null 2>&1
+                   for HOURFILE in `cat $MAINPATH/HOURLIST.$$`
+                   do
+                       grep -w $DEVICENAME $HOURFILE|awk '{print $NF,$'"$COLUMN"'}' >> $MAINPATH/SHOWLIST.$$
+                   done
+               done
+               rm -f $MAINPATH/HOURLIST.$$ > /dev/null 2>&1
+               MAX=`sort -n -k2 $MAINPATH/SHOWLIST.$$|tail -1|awk '{print $2}'`
+               test $MAX || MAX=0
+               cat $MAINPATH/SHOWLIST.$$|while read SHOWDATA
+               do
+                   (test $SHOWDATA || SHOWDATA="NULL 0") 2> /dev/null
+                   TIME=`echo $SHOWDATA|awk '{print $1}'`
+                   DATA=`echo $SHOWDATA|awk '{print $2}'`
+                   DISPLAY_Linux $TIME $MAX $DATA
+               done
+               rm -f $MAINPATH/SHOWLIST.$$ $MAINPATH/DAYLIST.$$
+               ;;
+       lparstat)   
+                  ;;
+       *) ECHO "\n`date` Error: The Parameter for -T must be vmstat/iostat/lparstat !\n" && exit 2
+          ;;
+  esac
+  rm -f $MAINPATH/DAYLIST.$$ > /dev/null 2>&1
+  rm -f $MAINPATH/SHOWLIST.$$ > /dev/null 2>&1
+}
+
+
+##########Check the Variables###############
+test $MAINPATH || (ECHO "\n`date` Error: The -d with Data Path Must be Specified !!!\n"; echo 2 > $CODEFILE)
+EXITCHECK
+#test $REMOTESERV && test $SERLIST && echo "\n`date` Error: The -t is conflicted with -L!!!\n" && echo 2 > $CODEFILE
+#test $REMOTESERV || test $SERLIST || (echo "\n`date` Error: The -t or -L Must Be Specified!!!\n" ; echo 2 > $CODEFILE)
+#EXITCHECK
+#
+#if [ $LISTMODE = YES ]
+#   then
+#       cd $SHELLPATH
+#       cp $SERLIST $TMPLIST
+#   else
+#       echo $REMOTESERV > $TMPLIST
+#fi
+
+
+##########Main Program###################
+case $LOCALPLATFORM in
+     AIX)   if [ $INIT = YES ]
+               then
+                   INIT_AIX
+               else
+                   case $WORKMODE in 
+                        collect) case $TYPE in
+                                      vmstat) VMSTAT_AIX ;;
+                                      iostat) IOSTAT_AIX ;;
+                                      lparstat) LPARSTAT_AIX ;;
+                                      *) ;;
+                                 esac
+                                 ;;
+                           show) case $TIMEMODE in
+                                      hourly) SHOW_H_AIX ;;
+                                      daily)  SHOW_D_AIX ;;
+                                      *) ECHO "\n`date` Error: The Parameter for -t must be hourly/daily !\n" ;;
+                                 esac
+                                 ;;
+                             *) ECHO "\n`date` Error: The Parameter for -m must be collect/show !\n" && exit 2
+                                ;;
+                   esac
+            fi
+            ;;
+     Linux) if [ $INIT = YES ]
+               then
+                   INIT_Linux
+               else
+                   case $WORKMODE in 
+                        collect) case $TYPE in
+                                      vmstat) VMSTAT_Linux ;;
+                                      iostat) IOSTAT_Linux ;;
+                                      *) ;;
+                                 esac
+                                 ;;
+                           show) case $TIMEMODE in
+                                      hourly) SHOW_H_Linux ;;
+                                      daily)  SHOW_D_Linux ;;
+                                      *) ECHO "\n`date` Error: The Parameter for -t must be hourly/daily !\n" ;;
+                                 esac
+                                 ;;
+                             *) ECHO "\n`date` Error: The Parameter for -m must be collect/show !\n" && exit 2
+                                ;;
+                   esac
+            fi
+            ;;
+	     *) ECHO "\n`date` Error: I still can't support your OS platform !\n" && exit 3
+            ;;
+esac
+
+rm -f $CODEFILE > /dev/null 2>&1
