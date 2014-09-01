@@ -1,0 +1,134 @@
+#!/bin/ksh
+#########################################################################
+#
+# File Name        : znmon
+#
+# Language         : Korn Shell
+#
+# Author           : Zhang Wei Qing (zh.weiqing@gmail.com)
+#
+# Description      : Enable the NMON Collection
+#
+# Version          : 1.3
+#
+# Revision History:
+#
+# Date        Author           Description
+# ---------------------------- -------------------------------------------
+# 2013/12/04  Zhang Wei Qing   v1.0 Initial Version
+# 2014/01/28  Zhang Wei Qing   v1.1 Change the default collection interval
+# 2014/05/12  Zhang Wei Qing   v1.2 Change the default collection directory
+# 2014/07/24  Zhang Wei Qing   v1.3 Optimize the function ECHO
+#########################################################################
+
+#########Return Code List################
+#0: Normal
+#1: No Option Specified
+#2: Wrong Parameters
+#3: 
+#4: Return the Help Information
+#5: Return the Version
+#6: Wrong Option
+#########################################
+
+#########Default Variables###############
+VERSION=1.3
+LOCALPLATFORM=`uname -s`
+NMON=`which nmon`
+NMONPATH=/tmp/nmon1/`uname -n`
+NMONBKPATH=/tmp/nmon2/`uname -n`
+SECONDS=120
+COUNTS=720
+PARAMETERS='-fDEt'
+BKDATA=NO
+CLEARDATA=NO
+CLEARBKDATA=NO
+
+
+##########Fucntion ECHO()##################
+ECHO()
+{
+  case $LOCALPLATFORM in
+       Linux) echo -e $1 ;;
+       AIX)   echo $1    ;;
+       *)     echo $1    ;;
+  esac
+}
+
+
+##########Function EXITCHECK()#############
+EXITCHECK()
+{
+test -e $CODEFILE && EXITCODE=`cat $CODEFILE` && test $EXITCODE != 0 && exit $EXITCODE
+rm -f $CODEFILE
+}
+
+
+##########Get the Options################
+while getopts "O:d:D:s:c:k:b:hv" OPTION
+do
+    case $OPTION in
+         O) PARAMETERS=$OPTARG  ;;    ###PARAMETERS is the specified parameters for nmon, default is -fDEt
+         d) NMONPATH=$OPTARG    ;;    ###Default Local Directory is /tmp/nmon1/`uname -n`
+         D) NMONBKPATH=$OPTARG  
+            BKDATA=YES          ;;    ###Default is /tmp/nmon2/`uname -n`
+         s) SECONDS=$OPTARG     ;;    ###Default is 60 seconds
+         c) COUNTS=$OPTARG      ;;    ###Default is 1440, it means 60*1440=1 Day
+         k) DATAKEEP=$OPTARG    
+            CLEARDATA=YES       ;;    ###Default is No Deletion, it means the data will be kept only 7 days
+         b) BKDATAKEEP=$OPTARG  
+            CLEARBKDATA=YES     ;;    ###Default is No Deletion, it means the data will be kept only 365 days
+         h) ECHO "\nznmon -[Odbsckbhv]\n"
+            ECHO "-O: NMON Parameters\n-d: Data Directory\n-b: Secondary Data Directory\n-s: Collection Interval for nmon\n-c: Collection Counts for nmon\n-k: Days Which You Want Keep in Data Directory\n-b: Days Which You Want to Keep in Secondary Data Directory\n-h: Get the help for parameters\n-v: Get the version information.\n"
+            ECHO 'Example with all default parameters: znmon #It means znmon -O '-fDEt' -d /tmp/nmon1/`hostname` -s 60 -c 1440'
+            ECHO "Example with full parameters:        znmon -O '-fDEt' -d /tmp/nmon1/`hostname` -D /tmp/nmon2/`hostname` -s 60 -c 1440 -k 7 -b 365"
+            ECHO "Example with only data directory:    znmon -O '-fDEt' -d /tmp/nmon1/`hostname` -s 60 -c 1440"
+            exit 0 ;;
+         v) echo "$VERSION" 
+            exit 0 ;;
+         *) echo "Error: Please Input the Correct Parameters, you can execute "znmon -h" to get help."
+            exit 6 ;;
+    esac
+done
+
+
+##########Check the Variables###############
+test -d ${NMONPATH}   || ECHO "\n`date` Warning: The Directory is not Existed, I Will Create The Directory!!!\n"
+test -d ${NMONPATH}   || (mkdir -p ${NMONPATH} && chmod 755 ${NMONPATH})
+test -d ${NMONBKPATH} || ECHO "\n`date` Warning: The Directory is not Existed, I Will Create The Backup Directory!!!\n"
+test -d ${NMONBKPATH} || (mkdir -p ${NMONPATH} && chmod 755 ${NMONPATH})
+
+
+##########Move the data to Secondary Data Directory########
+if [ $BKDATA = YES ]
+   then
+       test -d ${NMONPATH} && test -d ${NMONBKPATH} && find ${NMONPATH} -type f -name "*.nmon" -mtime -2 -exec cp -p {} ${NMONBKPATH} \;
+   else
+       ECHO "\n`date` Error: Backup Action is !!!\n"
+fi
+
+
+##########Clear the Secondary Data Directory###############
+if [ $CLEARBKDATA = YES ]
+   then
+       test -d ${NMONBKPATH} && find ${NMONBKPATH} -type f -name "*.nmon" -mtime +${BKDATAKEEP} -exec rm -f {} \;
+   else
+       :
+fi
+
+
+##########Clear the Data Directory#########################
+if [ $CLEARDATA = YES ]
+   then
+       test -d ${NMONPATH} && find ${NMONPATH} -type f -name "*.nmon" -mtime +${DATAKEEP} -exec rm -f {} \;
+   else
+       :
+fi
+
+
+##########Change the Access Permission#####################
+test -d ${NMONPATH} && find ${NMONPATH} -type f -name "*.nmon" -exec chmod 644 {} \;
+
+
+##########Enable the NMON##################################
+${NMON} ${PARAMETERS} -m ${NMONPATH} -s ${SECONDS} -c ${COUNTS}
